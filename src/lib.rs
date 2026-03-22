@@ -1,14 +1,12 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+pub mod config;
+pub mod context;
+pub mod error;
+pub mod packet;
+mod platform;
+pub mod subscription;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use config::{SourceFilter, SubscriptionConfig};
+pub use context::Context;
+pub use error::McrxError;
+pub use packet::Packet;
+pub use subscription::{Subscription, SubscriptionId};
