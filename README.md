@@ -113,25 +113,35 @@ Returns:
 
 ## 🧪 Platform Support
 
-| OS      | ASM | SSM | Notes            |
-|---------|-----|-----|------------------|
-| macOS   | ✅   | ✅   | Verified locally |
-| Linux   | ⏳   | ⏳   | Planned          |
-| Windows | ⏳   | ⏳   | Planned          |
+| OS      | ASM | SSM | Notes    |
+|---------|-----|-----|----------|
+| macOS   | ✅   | ✅   | Verified |
+| Linux   | ⏳   | ⏳   | Planned  |
+| Windows | ✅   | ✅   | Verified |
 
 ---
 
-## 🔁 Cross-Platform Compatibility
+## 🔁 ASM Cross-Platform Compatibility
 
-| Sender → Receiver | ASM | SSM | Status  |
-|-------------------|-----|-----|---------|
-| macOS → macOS     | ✅   | ✅   | Tested  |
-| Windows → macOS   | ⏳   | ⏳   | Planned |
-| macOS → Windows   | ⏳   | ⏳   | Planned |
-| Linux → macOS     | ⏳   | ⏳   | Planned |
-| macOS → Linux     | ⏳   | ⏳   | Planned |
-| Windows → Linux   | ⏳   | ⏳   | Planned |
-| Linux → Windows   | ⏳   | ⏳   | Planned |
+| Sender / Receiver | macOS | Windows | Linux | Android | iOS |
+|-------------------|-------|---------|-------|---------|-----|
+| macOS             | ✅     | ✅       | ⏳     | ⏳       | ⏳   |
+| Windows           | ✅     | ✅       | ⏳     | ⏳       | ⏳   |
+| Linux             | ⏳     | ⏳       | ⏳     | ⏳       | ⏳   |
+| Android           | ⏳     | ⏳       | ⏳     | ⏳       | ⏳   |
+| iOS               | ⏳     | ⏳       | ⏳     | ⏳       | ⏳   |
+
+---
+
+## 🔁 SSM Cross-Platform Compatibility
+
+| Sender / Receiver | macOS | Windows | Linux | Android | iOS |
+|-------------------|-------|---------|-------|---------|-----|
+| macOS             | ✅     | ✅       | ⏳     | ⏳       | ⏳   |
+| Windows           | ✅     | ✅       | ⏳     | ⏳       | ⏳   |
+| Linux             | ⏳     | ⏳       | ⏳     | ⏳       | ⏳   |
+| Android           | ⏳     | ⏳       | ⏳     | ⏳       | ⏳   |
+| iOS               | ⏳     | ⏳       | ⏳     | ⏳       | ⏳   |
 
 ---
 
