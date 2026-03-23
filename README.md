@@ -137,9 +137,9 @@ Returns:
 
 | Sender / Receiver | macOS | Windows | Linux | Android | iOS |
 |-------------------|-------|---------|-------|---------|-----|
-| macOS             | ✅     | ✅       | ⏳     | ⏳       | ⏳   |
-| Windows           | ✅     | ✅       | ⏳     | ⏳       | ⏳   |
-| Linux             | ⏳     | ⏳       | ⏳     | ⏳       | ⏳   |
+| macOS             | ✅     | ✅       | ✅     | ⏳       | ⏳   |
+| Windows           | ✅     | ✅       | ✅     | ⏳       | ⏳   |
+| Linux             | ✅     | ✅       | ✅     | ⏳       | ⏳   |
 | Android           | ⏳     | ⏳       | ⏳     | ⏳       | ⏳   |
 | iOS               | ⏳     | ⏳       | ⏳     | ⏳       | ⏳   |
 
