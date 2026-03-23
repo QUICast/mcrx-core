@@ -9,6 +9,7 @@ use crate::subscription::{Subscription, SubscriptionId};
 pub struct Context {
     subscriptions: Vec<Subscription>,
     next_subscription_id: u64,
+    next_recv_index: usize,
 }
 
 impl Context {
@@ -17,6 +18,7 @@ impl Context {
         Self {
             subscriptions: Vec::new(),
             next_subscription_id: 1,
+            next_recv_index: 0,
         }
     }
 
@@ -100,12 +102,23 @@ impl Context {
     }
 
     /// Attempts to receive a single packet from any subscription without blocking.
+    /// Uses round-robin style fairness across the different subscriptions.
     ///
     /// Returns the first available packet, if any subscription currently has one
     /// ready to be read.
-    pub fn try_recv_any(&self) -> Result<Option<Packet>, McrxError> {
-        for subscription in &self.subscriptions {
+    pub fn try_recv_any(&mut self) -> Result<Option<Packet>, McrxError> {
+        let subscription_count = self.subscriptions.len();
+
+        if subscription_count == 0 {
+            return Ok(None);
+        }
+
+        for offset in 0..subscription_count {
+            let index = (self.next_recv_index + offset) % subscription_count;
+            let subscription = &self.subscriptions[index];
+
             if let Some(packet) = subscription.try_recv()? {
+                self.next_recv_index = (index + 1) % subscription_count;
                 return Ok(Some(packet));
             }
         }
