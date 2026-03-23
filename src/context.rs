@@ -1,5 +1,6 @@
 use crate::config::SubscriptionConfig;
 use crate::error::McrxError;
+use crate::packet::Packet;
 use crate::platform::open_and_join_socket;
 use crate::subscription::{Subscription, SubscriptionId};
 
@@ -38,6 +39,12 @@ impl Context {
             .find(|subscription| subscription.id() == id)
     }
 
+    /// Returns a mutable reference to the subscription with the given ID, if it exists.
+    pub fn get_subscription_mut(&mut self, id: SubscriptionId) -> Option<&mut Subscription> {
+        self.subscriptions
+            .iter_mut()
+            .find(|subscription| subscription.id() == id)
+    }
     /// Adds a new subscription to the context.
     ///
     /// The configuration is validated before insertion. If an identical subscription
@@ -91,13 +98,29 @@ impl Context {
     pub fn subscriptions(&self) -> &[Subscription] {
         &self.subscriptions
     }
+
+    /// Attempts to receive a single packet from any subscription without blocking.
+    ///
+    /// Returns the first available packet, if any subscription currently has one
+    /// ready to be read.
+    pub fn try_recv_any(&self) -> Result<Option<Packet>, McrxError> {
+        for subscription in &self.subscriptions {
+            if let Some(packet) = subscription.try_recv()? {
+                return Ok(Some(packet));
+            }
+        }
+
+        Ok(None)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::SourceFilter;
-    use std::net::Ipv4Addr;
+    use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     fn sample_config(port: u16) -> SubscriptionConfig {
         SubscriptionConfig {
@@ -234,5 +257,67 @@ mod tests {
         let subscription = context.get_subscription(SubscriptionId(999));
 
         assert!(subscription.is_none());
+    }
+
+    #[test]
+    fn get_subscription_mut_returns_matching_subscription() {
+        let mut context = Context::new();
+        let id = context.add_subscription(sample_config(9001)).unwrap();
+
+        let subscription = context.get_subscription_mut(id);
+
+        assert!(subscription.is_some());
+        assert_eq!(subscription.unwrap().id(), id);
+    }
+
+    #[test]
+    fn get_subscription_mut_returns_none_for_missing_id() {
+        let mut context = Context::new();
+
+        let subscription = context.get_subscription_mut(SubscriptionId(999));
+
+        assert!(subscription.is_none());
+    }
+
+    #[test]
+    fn try_recv_any_returns_none_when_no_packet_is_available() {
+        let mut context = Context::new();
+        context.add_subscription(sample_config(9002)).unwrap();
+
+        let result = context.try_recv_any().unwrap();
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn try_recv_any_returns_packet_from_ready_subscription() {
+        let mut context = Context::new();
+        let config = sample_config(9003);
+        context.add_subscription(config.clone()).unwrap();
+
+        let sender = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+        sender.set_multicast_loop_v4(true).unwrap();
+        sender.set_multicast_ttl_v4(1).unwrap();
+
+        let payload = b"context try_recv_any";
+        sender
+            .send_to(payload, SocketAddrV4::new(config.group, config.dst_port))
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            match context.try_recv_any().unwrap() {
+                Some(packet) => {
+                    assert_eq!(packet.group, std::net::IpAddr::V4(config.group));
+                    assert_eq!(packet.dst_port, config.dst_port);
+                    assert_eq!(&packet.payload[..], payload);
+                    break;
+                }
+                None if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                None => panic!("timed out waiting for packet from context"),
+            }
+        }
     }
 }
