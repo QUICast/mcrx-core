@@ -67,6 +67,37 @@ println ! ("Received {} bytes from {}", packet.payload.len(), packet.source);
 
 ---
 
+---
+
+## 🧪 Demo Binaries
+
+### Receiver
+
+```bash
+cargo run --bin mcrx_recv -- 239.1.2.3 5000
+cargo run --bin mcrx_recv -- 232.1.2.3 5000 192.168.1.10
+cargo run --bin mcrx_recv -- 232.1.2.3 5000 192.168.1.10 192.168.1.20
+```
+
+- omit `source` for ASM
+- provide `source` for SSM
+- `interface` is optional and selects the local join interface
+
+---
+
+### Sender
+
+```bash
+cargo run --bin mcrx_send -- 239.1.2.3 5000 hello
+cargo run --bin mcrx_send -- 239.1.2.3 5000 hello 1000
+cargo run --bin mcrx_send -- 232.1.2.3 5000 hello 1000 192.168.1.20
+```
+
+- optional `interval_ms` enables periodic sending
+- optional `interface` selects the outgoing interface
+
+---
+
 ## 🔄 Receive Model
 
 - `try_recv()` → per subscription
