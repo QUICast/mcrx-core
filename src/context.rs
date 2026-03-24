@@ -90,6 +90,13 @@ impl Context {
             .position(|subscription| subscription.id() == id)
         {
             self.subscriptions.swap_remove(index);
+
+            if self.subscriptions.is_empty() {
+                self.next_recv_index = 0;
+            } else {
+                self.next_recv_index %= self.subscriptions.len();
+            }
+
             true
         } else {
             false
@@ -125,6 +132,59 @@ impl Context {
 
         Ok(None)
     }
+
+    /// Attempts to receive up to `max_packets` packets from any subscriptions without blocking.
+    ///
+    /// This method repeatedly calls `try_recv_any()` using the same round-robin fairness logic
+    /// and pushes received packets into the provided `out` vector.
+    ///
+    /// Returns the number of packets that were added to `out`.
+    ///
+    /// Behavior:
+    /// - Stops early if no more packets are available
+    /// - Does not block or wait for new packets
+    /// - Preserves fairness across subscriptions
+    pub fn try_recv_batch_into(
+        &mut self,
+        out: &mut Vec<Packet>,
+        max_packets: usize,
+    ) -> Result<usize, McrxError> {
+        let mut received = 0;
+
+        for _ in 0..max_packets {
+            match self.try_recv_any()? {
+                Some(packet) => {
+                    out.push(packet);
+                    received += 1;
+                }
+                None => break,
+            }
+        }
+
+        Ok(received)
+    }
+
+    /// Attempts to receive all currently available packets without blocking.
+    ///
+    /// This is a convenience wrapper around `try_recv_batch_into` that continues
+    /// draining until no more packets are available.
+    ///
+    /// Note: this may result in unbounded growth of `out` if a large number of
+    /// packets are queued, so callers should ensure capacity if needed.
+    pub fn try_recv_all_into(&mut self, out: &mut Vec<Packet>) -> Result<usize, McrxError> {
+        let mut total_received = 0;
+
+        loop {
+            let received = self.try_recv_batch_into(out, usize::MAX)?;
+            total_received += received;
+
+            if received == 0 {
+                break;
+            }
+        }
+
+        Ok(total_received)
+    }
 }
 
 #[cfg(test)]
@@ -142,6 +202,46 @@ mod tests {
             dst_port: port,
             interface: None,
         }
+    }
+
+    fn recv_next_packet(context: &mut Context, deadline: Instant) -> Packet {
+        loop {
+            match context.try_recv_any().unwrap() {
+                Some(packet) => return packet,
+                None if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                None => panic!("timed out waiting for packet"),
+            }
+        }
+    }
+
+    fn send_round_robin_test_packets(
+        first_config: &SubscriptionConfig,
+        second_config: &SubscriptionConfig,
+    ) {
+        let sender = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+        sender.set_multicast_loop_v4(true).unwrap();
+        sender.set_multicast_ttl_v4(1).unwrap();
+
+        sender
+            .send_to(
+                b"first-1",
+                SocketAddrV4::new(first_config.group, first_config.dst_port),
+            )
+            .unwrap();
+        sender
+            .send_to(
+                b"second-1",
+                SocketAddrV4::new(second_config.group, second_config.dst_port),
+            )
+            .unwrap();
+        sender
+            .send_to(
+                b"first-2",
+                SocketAddrV4::new(first_config.group, first_config.dst_port),
+            )
+            .unwrap();
     }
 
     #[test]
@@ -332,5 +432,125 @@ mod tests {
                 None => panic!("timed out waiting for packet from context"),
             }
         }
+    }
+
+    #[test]
+    fn try_recv_any_round_robins_between_ready_subscriptions() {
+        let mut context = Context::new();
+        let first_config = sample_config(9004);
+        let second_config = sample_config(9005);
+
+        let first_id = context.add_subscription(first_config.clone()).unwrap();
+        let second_id = context.add_subscription(second_config.clone()).unwrap();
+
+        send_round_robin_test_packets(&first_config, &second_config);
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+
+        let first_packet = recv_next_packet(&mut context, deadline);
+        let second_packet = recv_next_packet(&mut context, deadline);
+        let third_packet = recv_next_packet(&mut context, deadline);
+
+        assert_eq!(
+            (first_packet.subscription_id, &first_packet.payload[..]),
+            (first_id, b"first-1".as_slice())
+        );
+
+        assert_eq!(
+            (second_packet.subscription_id, &second_packet.payload[..]),
+            (second_id, b"second-1".as_slice())
+        );
+
+        assert_eq!(
+            (third_packet.subscription_id, &third_packet.payload[..]),
+            (first_id, b"first-2".as_slice())
+        );
+    }
+
+    #[test]
+    fn try_recv_batch_into_returns_zero_when_no_packet_is_available() {
+        let mut context = Context::new();
+        context.add_subscription(sample_config(9006)).unwrap();
+
+        let mut packets = Vec::new();
+        let received = context.try_recv_batch_into(&mut packets, 8).unwrap();
+
+        assert_eq!(received, 0);
+        assert!(packets.is_empty());
+    }
+
+    #[test]
+    fn try_recv_batch_into_receives_up_to_max_packets() {
+        let mut context = Context::new();
+        let first_config = sample_config(9007);
+        let second_config = sample_config(9008);
+
+        let first_id = context.add_subscription(first_config.clone()).unwrap();
+        let second_id = context.add_subscription(second_config.clone()).unwrap();
+
+        send_round_robin_test_packets(&first_config, &second_config);
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut packets = Vec::new();
+
+        while packets.len() < 2 && Instant::now() < deadline {
+            context.try_recv_batch_into(&mut packets, 2).unwrap();
+
+            if packets.len() < 2 {
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        assert_eq!(packets.len(), 2);
+
+        assert_eq!(
+            (packets[0].subscription_id, &packets[0].payload[..]),
+            (first_id, b"first-1".as_slice())
+        );
+
+        assert_eq!(
+            (packets[1].subscription_id, &packets[1].payload[..]),
+            (second_id, b"second-1".as_slice())
+        );
+    }
+
+    #[test]
+    fn try_recv_all_into_drains_all_available_packets() {
+        let mut context = Context::new();
+        let first_config = sample_config(9009);
+        let second_config = sample_config(9010);
+
+        let first_id = context.add_subscription(first_config.clone()).unwrap();
+        let second_id = context.add_subscription(second_config.clone()).unwrap();
+
+        send_round_robin_test_packets(&first_config, &second_config);
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut packets = Vec::new();
+
+        while packets.len() < 3 && Instant::now() < deadline {
+            context.try_recv_all_into(&mut packets).unwrap();
+
+            if packets.len() < 3 {
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        assert_eq!(packets.len(), 3);
+
+        assert_eq!(
+            (packets[0].subscription_id, &packets[0].payload[..]),
+            (first_id, b"first-1".as_slice())
+        );
+
+        assert_eq!(
+            (packets[1].subscription_id, &packets[1].payload[..]),
+            (second_id, b"second-1".as_slice())
+        );
+
+        assert_eq!(
+            (packets[2].subscription_id, &packets[2].payload[..]),
+            (first_id, b"first-2".as_slice())
+        );
     }
 }

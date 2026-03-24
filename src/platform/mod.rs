@@ -81,7 +81,7 @@ mod tests {
             group: Ipv4Addr::new(232, 1, 2, 3),
             source: SourceFilter::Source(Ipv4Addr::new(192, 168, 188, 50)),
             dst_port: 55001,
-            interface: Option::from(Ipv4Addr::new(192, 168, 188, 107)),
+            interface: None,
         };
 
         let socket = open_and_join_socket(&config);
