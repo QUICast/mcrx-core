@@ -3,23 +3,11 @@ use crate::error::McrxError;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use std::net::{Ipv4Addr, SocketAddrV4};
 
-/// Opens, binds, and joins a UDP multicast socket for the given subscription.
-///
-/// This currently supports IPv4 ASM (`(*, G)`) subscriptions.
-/// SSM (`(S, G)`) is not yet implemented.
-pub(crate) fn open_and_join_socket(config: &SubscriptionConfig) -> Result<Socket, McrxError> {
-    let socket = open_bound_socket(config)?;
-
-    join_multicast_group(&socket, config)?;
-
-    Ok(socket)
-}
-
 /// Opens and binds a UDP socket for the given subscription configuration.
 ///
 /// The socket is bound to `0.0.0.0:dst_port` so it can receive multicast traffic
 /// destined for the configured UDP port.
-fn open_bound_socket(config: &SubscriptionConfig) -> Result<Socket, McrxError> {
+pub(crate) fn open_bound_socket(config: &SubscriptionConfig) -> Result<Socket, McrxError> {
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
         .map_err(McrxError::SocketCreateFailed)?;
 
@@ -40,8 +28,11 @@ fn open_bound_socket(config: &SubscriptionConfig) -> Result<Socket, McrxError> {
     Ok(socket)
 }
 
-/// Joins the configured multicast group on the given socket.
-fn join_multicast_group(socket: &Socket, config: &SubscriptionConfig) -> Result<(), McrxError> {
+/// Joins the configured multicast group on an already bound socket.
+pub(crate) fn join_multicast_group(
+    socket: &Socket,
+    config: &SubscriptionConfig,
+) -> Result<(), McrxError> {
     let interface = config.interface.unwrap_or(Ipv4Addr::UNSPECIFIED);
 
     match config.source {
@@ -52,6 +43,24 @@ fn join_multicast_group(socket: &Socket, config: &SubscriptionConfig) -> Result<
         SourceFilter::Source(source) => socket
             .join_ssm_v4(&source, &config.group, &interface)
             .map_err(McrxError::MulticastJoinFailed),
+    }
+}
+
+/// Leaves the configured multicast group on the given socket.
+pub(crate) fn leave_multicast_group(
+    socket: &Socket,
+    config: &SubscriptionConfig,
+) -> Result<(), McrxError> {
+    let interface = config.interface.unwrap_or(Ipv4Addr::UNSPECIFIED);
+
+    match config.source {
+        SourceFilter::Any => socket
+            .leave_multicast_v4(&config.group, &interface)
+            .map_err(McrxError::MulticastLeaveFailed),
+
+        SourceFilter::Source(source) => socket
+            .leave_ssm_v4(&source, &config.group, &interface)
+            .map_err(McrxError::MulticastLeaveFailed),
     }
 }
 
@@ -70,9 +79,12 @@ mod tests {
             interface: None,
         };
 
-        let socket = open_and_join_socket(&config);
-
+        let socket = open_bound_socket(&config);
         assert!(socket.is_ok());
+
+        let socket = socket.unwrap();
+        let result = join_multicast_group(&socket, &config);
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -84,8 +96,11 @@ mod tests {
             interface: None,
         };
 
-        let socket = open_and_join_socket(&config);
-
+        let socket = open_bound_socket(&config);
         assert!(socket.is_ok());
+
+        let socket = socket.unwrap();
+        let result = join_multicast_group(&socket, &config);
+        assert!(result.is_ok());
     }
 }

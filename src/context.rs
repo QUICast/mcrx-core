@@ -1,7 +1,7 @@
 use crate::config::SubscriptionConfig;
 use crate::error::McrxError;
 use crate::packet::Packet;
-use crate::platform::open_and_join_socket;
+use crate::platform::{join_multicast_group, leave_multicast_group, open_bound_socket};
 use crate::subscription::{Subscription, SubscriptionId};
 
 /// Owns and manages the set of active subscriptions.
@@ -51,7 +51,9 @@ impl Context {
     ///
     /// The configuration is validated before insertion. If an identical subscription
     /// already exists, an error is returned instead of creating a duplicate.
-    /// This function creates the socket, binds it, and attempts to join the multicast group
+    ///
+    /// This function creates and binds the underlying socket, but does not join the
+    /// multicast group yet. Call `join_subscription()` to activate multicast reception.
     pub fn add_subscription(
         &mut self,
         config: SubscriptionConfig,
@@ -66,7 +68,7 @@ impl Context {
             return Err(McrxError::DuplicateSubscription);
         }
 
-        let socket = open_and_join_socket(&config)?;
+        let socket = open_bound_socket(&config)?;
 
         let id = SubscriptionId(self.next_subscription_id);
         self.next_subscription_id += 1;
@@ -103,6 +105,38 @@ impl Context {
         }
     }
 
+    /// Joins the multicast group for the given subscription.
+    pub fn join_subscription(&mut self, id: SubscriptionId) -> Result<(), McrxError> {
+        let subscription = self
+            .get_subscription_mut(id)
+            .ok_or(McrxError::SubscriptionNotFound)?;
+
+        if subscription.is_joined() {
+            return Err(McrxError::SubscriptionAlreadyJoined);
+        }
+
+        join_multicast_group(subscription.socket(), subscription.config())?;
+        subscription.mark_joined()?;
+
+        Ok(())
+    }
+
+    /// Leaves the multicast group for the given subscription while keeping the socket bound.
+    pub fn leave_subscription(&mut self, id: SubscriptionId) -> Result<(), McrxError> {
+        let subscription = self
+            .get_subscription_mut(id)
+            .ok_or(McrxError::SubscriptionNotFound)?;
+
+        if !subscription.is_joined() {
+            return Err(McrxError::SubscriptionNotJoined);
+        }
+
+        leave_multicast_group(subscription.socket(), subscription.config())?;
+        subscription.mark_bound()?;
+
+        Ok(())
+    }
+
     /// Returns a read-only slice of all subscriptions currently stored in the context.
     pub fn subscriptions(&self) -> &[Subscription] {
         &self.subscriptions
@@ -123,6 +157,10 @@ impl Context {
         for offset in 0..subscription_count {
             let index = (self.next_recv_index + offset) % subscription_count;
             let subscription = &self.subscriptions[index];
+
+            if !subscription.is_joined() {
+                continue;
+            }
 
             if let Some(packet) = subscription.try_recv()? {
                 self.next_recv_index = (index + 1) % subscription_count;
@@ -191,6 +229,7 @@ impl Context {
 mod tests {
     use super::*;
     use crate::config::SourceFilter;
+    use crate::subscription::SubscriptionState;
     use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
     use std::thread;
     use std::time::{Duration, Instant};
@@ -395,7 +434,8 @@ mod tests {
     #[test]
     fn try_recv_any_returns_none_when_no_packet_is_available() {
         let mut context = Context::new();
-        context.add_subscription(sample_config(9002)).unwrap();
+        let id = context.add_subscription(sample_config(9002)).unwrap();
+        context.join_subscription(id).unwrap();
 
         let result = context.try_recv_any().unwrap();
 
@@ -406,7 +446,8 @@ mod tests {
     fn try_recv_any_returns_packet_from_ready_subscription() {
         let mut context = Context::new();
         let config = sample_config(9003);
-        context.add_subscription(config.clone()).unwrap();
+        let id = context.add_subscription(config.clone()).unwrap();
+        context.join_subscription(id).unwrap();
 
         let sender = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)).unwrap();
         sender.set_multicast_loop_v4(true).unwrap();
@@ -441,7 +482,9 @@ mod tests {
         let second_config = sample_config(9005);
 
         let first_id = context.add_subscription(first_config.clone()).unwrap();
+        context.join_subscription(first_id).unwrap();
         let second_id = context.add_subscription(second_config.clone()).unwrap();
+        context.join_subscription(second_id).unwrap();
 
         send_round_robin_test_packets(&first_config, &second_config);
 
@@ -470,7 +513,8 @@ mod tests {
     #[test]
     fn try_recv_batch_into_returns_zero_when_no_packet_is_available() {
         let mut context = Context::new();
-        context.add_subscription(sample_config(9006)).unwrap();
+        let id = context.add_subscription(sample_config(9006)).unwrap();
+        context.join_subscription(id).unwrap();
 
         let mut packets = Vec::new();
         let received = context.try_recv_batch_into(&mut packets, 8).unwrap();
@@ -486,7 +530,9 @@ mod tests {
         let second_config = sample_config(9008);
 
         let first_id = context.add_subscription(first_config.clone()).unwrap();
+        context.join_subscription(first_id).unwrap();
         let second_id = context.add_subscription(second_config.clone()).unwrap();
+        context.join_subscription(second_id).unwrap();
 
         send_round_robin_test_packets(&first_config, &second_config);
 
@@ -521,7 +567,9 @@ mod tests {
         let second_config = sample_config(9010);
 
         let first_id = context.add_subscription(first_config.clone()).unwrap();
+        context.join_subscription(first_id).unwrap();
         let second_id = context.add_subscription(second_config.clone()).unwrap();
+        context.join_subscription(second_id).unwrap();
 
         send_round_robin_test_packets(&first_config, &second_config);
 
@@ -552,5 +600,58 @@ mod tests {
             (packets[2].subscription_id, &packets[2].payload[..]),
             (first_id, b"first-2".as_slice())
         );
+    }
+
+    #[test]
+    fn add_subscription_creates_bound_subscription() {
+        let mut context = Context::new();
+        let id = context.add_subscription(sample_config(9011)).unwrap();
+
+        let subscription = context.get_subscription(id).unwrap();
+        assert_eq!(subscription.state(), SubscriptionState::Bound);
+    }
+
+    #[test]
+    fn join_subscription_transitions_bound_to_joined() {
+        let mut context = Context::new();
+        let id = context.add_subscription(sample_config(9012)).unwrap();
+
+        context.join_subscription(id).unwrap();
+
+        let subscription = context.get_subscription(id).unwrap();
+        assert_eq!(subscription.state(), SubscriptionState::Joined);
+    }
+
+    #[test]
+    fn leave_subscription_transitions_joined_to_bound() {
+        let mut context = Context::new();
+        let id = context.add_subscription(sample_config(9013)).unwrap();
+
+        context.join_subscription(id).unwrap();
+        context.leave_subscription(id).unwrap();
+
+        let subscription = context.get_subscription(id).unwrap();
+        assert_eq!(subscription.state(), SubscriptionState::Bound);
+    }
+
+    #[test]
+    fn join_subscription_rejects_already_joined_subscription() {
+        let mut context = Context::new();
+        let id = context.add_subscription(sample_config(9014)).unwrap();
+
+        context.join_subscription(id).unwrap();
+        let result = context.join_subscription(id);
+
+        assert!(matches!(result, Err(McrxError::SubscriptionAlreadyJoined)));
+    }
+
+    #[test]
+    fn leave_subscription_rejects_not_joined_subscription() {
+        let mut context = Context::new();
+        let id = context.add_subscription(sample_config(9015)).unwrap();
+
+        let result = context.leave_subscription(id);
+
+        assert!(matches!(result, Err(McrxError::SubscriptionNotJoined)));
     }
 }

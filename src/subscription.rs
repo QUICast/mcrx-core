@@ -9,18 +9,36 @@ use std::io::ErrorKind;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SubscriptionId(pub u64);
 
+/// Represents the lifecycle state of a subscription.
+///
+/// A subscription is always associated with a bound socket, but may or may not
+/// currently be joined to a multicast group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscriptionState {
+    /// Socket is bound but multicast group is not joined
+    Bound,
+    /// Multicast group is joined
+    Joined,
+}
+
 /// Represents a registered subscription stored inside a context.
 #[derive(Debug)]
 pub struct Subscription {
     id: SubscriptionId,
     config: SubscriptionConfig,
     socket: Socket,
+    state: SubscriptionState,
 }
 
 impl Subscription {
     /// Creates a new subscription from an ID and configuration.
     pub fn new(id: SubscriptionId, config: SubscriptionConfig, socket: Socket) -> Self {
-        Self { id, config, socket }
+        Self {
+            id,
+            config,
+            socket,
+            state: SubscriptionState::Bound,
+        }
     }
 
     /// Returns the subscription's ID.
@@ -52,6 +70,9 @@ impl Subscription {
     /// - `Ok(None)` if no packet is currently available,
     /// - `Err(...)` on an actual receive failure.
     pub fn try_recv(&self) -> Result<Option<Packet>, McrxError> {
+        if !self.is_joined() {
+            return Err(McrxError::SubscriptionNotJoined);
+        }
         let mut buf = [std::mem::MaybeUninit::<u8>::uninit(); 65535];
 
         match self.socket.recv_from(&mut buf) {
@@ -87,6 +108,52 @@ impl Subscription {
     pub fn as_raw_fd(&self) -> std::os::fd::RawFd {
         use std::os::fd::AsRawFd;
         self.socket.as_raw_fd()
+    }
+
+    /// Returns the current lifecycle state of the subscription.
+    ///
+    /// This can be used by callers to inspect whether the subscription is
+    /// currently joined to its multicast group or only bound.
+    pub fn state(&self) -> SubscriptionState {
+        self.state
+    }
+
+    /// Returns `true` if the subscription is currently joined to its multicast group.
+    ///
+    /// This is a convenience helper for checking whether the subscription is in
+    /// the `SubscriptionState::Joined` state.
+    pub fn is_joined(&self) -> bool {
+        matches!(self.state, SubscriptionState::Joined)
+    }
+
+    /// Marks the subscription as joined.
+    ///
+    /// This should be called after a successful multicast join operation on the
+    /// underlying socket.
+    ///
+    /// Returns an error if the subscription is already in the joined state.
+    pub fn mark_joined(&mut self) -> Result<(), McrxError> {
+        if self.state == SubscriptionState::Joined {
+            return Err(McrxError::SubscriptionAlreadyJoined);
+        }
+
+        self.state = SubscriptionState::Joined;
+        Ok(())
+    }
+
+    /// Marks the subscription as bound (not joined).
+    ///
+    /// This should be called after leaving a multicast group, while keeping the
+    /// underlying socket open and bound.
+    ///
+    /// Returns an error if the subscription is already in the bound state.
+    pub fn mark_bound(&mut self) -> Result<(), McrxError> {
+        if self.state == SubscriptionState::Bound {
+            return Err(McrxError::SubscriptionNotJoined);
+        }
+
+        self.state = SubscriptionState::Bound;
+        Ok(())
     }
 }
 
@@ -132,8 +199,10 @@ mod tests {
     #[test]
     fn try_recv_returns_none_when_no_packet_is_available() {
         let config = test_config(55020);
-        let socket = platform::open_and_join_socket(&config).unwrap();
-        let subscription = Subscription::new(SubscriptionId(1), config, socket);
+        let socket = platform::open_bound_socket(&config).unwrap();
+        let mut subscription = Subscription::new(SubscriptionId(1), config, socket);
+        platform::join_multicast_group(subscription.socket(), subscription.config()).unwrap();
+        subscription.mark_joined().unwrap();
 
         let result = subscription.try_recv().unwrap();
 
@@ -143,8 +212,10 @@ mod tests {
     #[test]
     fn try_recv_receives_packet_sent_to_bound_port() {
         let config = test_config(55021);
-        let socket = platform::open_and_join_socket(&config).unwrap();
-        let subscription = Subscription::new(SubscriptionId(1), config.clone(), socket);
+        let socket = platform::open_bound_socket(&config).unwrap();
+        let mut subscription = Subscription::new(SubscriptionId(1), config.clone(), socket);
+        platform::join_multicast_group(subscription.socket(), subscription.config()).unwrap();
+        subscription.mark_joined().unwrap();
 
         let sender = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
         let payload = b"hello multicast core";
@@ -161,13 +232,10 @@ mod tests {
             match subscription.try_recv().unwrap() {
                 Some(packet) => {
                     assert_eq!(packet.subscription_id, SubscriptionId(1));
-                    assert_eq!(packet.group, std::net::IpAddr::V4(config.group));
+                    assert_eq!(packet.group, IpAddr::V4(config.group));
                     assert_eq!(packet.dst_port, config.dst_port);
                     assert_eq!(&packet.payload[..], payload);
-                    assert_eq!(
-                        packet.source.ip(),
-                        std::net::IpAddr::V4(Ipv4Addr::LOCALHOST)
-                    );
+                    assert_eq!(packet.source.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
                     break;
                 }
                 None if Instant::now() < deadline => {
@@ -181,8 +249,10 @@ mod tests {
     #[test]
     fn try_recv_receives_multicast_packet_from_joined_group() {
         let config = test_config(55022);
-        let socket = platform::open_and_join_socket(&config).unwrap();
-        let subscription = Subscription::new(SubscriptionId(1), config.clone(), socket);
+        let socket = platform::open_bound_socket(&config).unwrap();
+        let mut subscription = Subscription::new(SubscriptionId(1), config.clone(), socket);
+        platform::join_multicast_group(subscription.socket(), subscription.config()).unwrap();
+        subscription.mark_joined().unwrap();
 
         let sender = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)).unwrap();
         sender.set_multicast_loop_v4(true).unwrap();
@@ -200,7 +270,7 @@ mod tests {
             match subscription.try_recv().unwrap() {
                 Some(packet) => {
                     assert_eq!(packet.subscription_id, SubscriptionId(1));
-                    assert_eq!(packet.group, std::net::IpAddr::V4(config.group));
+                    assert_eq!(packet.group, IpAddr::V4(config.group));
                     assert_eq!(packet.dst_port, config.dst_port);
                     assert_eq!(&packet.payload[..], payload);
                     assert_eq!(packet.source.port(), sender_port);
@@ -218,8 +288,10 @@ mod tests {
     fn try_recv_receives_ssm_packet_from_allowed_source() {
         let interface = primary_ipv4();
         let config = test_ssm_config(55023, interface);
-        let socket = platform::open_and_join_socket(&config).unwrap();
-        let subscription = Subscription::new(SubscriptionId(1), config.clone(), socket);
+        let socket = platform::open_bound_socket(&config).unwrap();
+        let mut subscription = Subscription::new(SubscriptionId(1), config.clone(), socket);
+        platform::join_multicast_group(subscription.socket(), subscription.config()).unwrap();
+        subscription.mark_joined().unwrap();
 
         let sender = UdpSocket::bind(SocketAddrV4::new(interface, 0)).unwrap();
         sender.set_multicast_loop_v4(true).unwrap();
@@ -250,5 +322,51 @@ mod tests {
                 None => panic!("timed out waiting for SSM packet"),
             }
         }
+    }
+
+    #[test]
+    fn mark_joined_transitions_bound_to_joined() {
+        let config = test_config(55024);
+        let socket = platform::open_bound_socket(&config).unwrap();
+        let mut subscription = Subscription::new(SubscriptionId(1), config, socket);
+
+        subscription.mark_joined().unwrap();
+
+        assert_eq!(subscription.state(), SubscriptionState::Joined);
+    }
+
+    #[test]
+    fn mark_joined_rejects_already_joined_subscription() {
+        let config = test_config(55025);
+        let socket = platform::open_bound_socket(&config).unwrap();
+        let mut subscription = Subscription::new(SubscriptionId(1), config, socket);
+
+        subscription.mark_joined().unwrap();
+        let result = subscription.mark_joined();
+
+        assert!(matches!(result, Err(McrxError::SubscriptionAlreadyJoined)));
+    }
+
+    #[test]
+    fn mark_bound_transitions_joined_to_bound() {
+        let config = test_config(55026);
+        let socket = platform::open_bound_socket(&config).unwrap();
+        let mut subscription = Subscription::new(SubscriptionId(1), config, socket);
+
+        subscription.mark_joined().unwrap();
+        subscription.mark_bound().unwrap();
+
+        assert_eq!(subscription.state(), SubscriptionState::Bound);
+    }
+
+    #[test]
+    fn mark_bound_rejects_already_bound_subscription() {
+        let config = test_config(55027);
+        let socket = platform::open_bound_socket(&config).unwrap();
+        let mut subscription = Subscription::new(SubscriptionId(1), config, socket);
+
+        let result = subscription.mark_bound();
+
+        assert!(matches!(result, Err(McrxError::SubscriptionNotJoined)));
     }
 }

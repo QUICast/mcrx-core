@@ -51,5 +51,17 @@ pub enum McrxError {
     InterfaceDiscoveryFailed(String),
 
     #[error("MCRX: receive failed: {0}")]
-    ReceiveFailed(std::io::Error),
+    ReceiveFailed(io::Error),
+
+    #[error("MCRX: Subscription not joined")]
+    SubscriptionNotJoined,
+
+    #[error("MCRX: subscription already joined")]
+    SubscriptionAlreadyJoined,
+
+    #[error("MCRX: failed to leave multicast group: {0}")]
+    MulticastLeaveFailed(std::io::Error),
+
+    #[error("MCRX: Subscription not found")]
+    SubscriptionNotFound,
 }
