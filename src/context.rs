@@ -4,12 +4,32 @@ use crate::packet::Packet;
 use crate::platform::{join_multicast_group, leave_multicast_group, open_bound_socket};
 use crate::subscription::{Subscription, SubscriptionId};
 
+#[cfg(feature = "metrics")]
+use crate::metrics::{ContextMetricsDelta, ContextMetricsSnapshot};
+#[cfg(feature = "metrics")]
+use std::cell::Cell;
+#[cfg(feature = "metrics")]
+use std::time::SystemTime;
+
+#[cfg(feature = "metrics")]
+#[derive(Debug, Default)]
+struct ContextMetricsInner {
+    subscriptions_added: Cell<u64>,
+    subscriptions_removed: Cell<u64>,
+    total_join_count: Cell<u64>,
+    total_leave_count: Cell<u64>,
+    batch_calls: Cell<u64>,
+    batch_packets_received: Cell<u64>,
+}
+
 /// Owns and manages the set of active subscriptions.
 #[derive(Debug, Default)]
 pub struct Context {
     subscriptions: Vec<Subscription>,
     next_subscription_id: u64,
     next_recv_index: usize,
+    #[cfg(feature = "metrics")]
+    metrics: ContextMetricsInner,
 }
 
 impl Context {
@@ -19,12 +39,51 @@ impl Context {
             subscriptions: Vec::new(),
             next_subscription_id: 1,
             next_recv_index: 0,
+            #[cfg(feature = "metrics")]
+            metrics: ContextMetricsInner::default(),
         }
     }
 
     /// Returns the number of active subscriptions currently stored in the context.
     pub fn subscription_count(&self) -> usize {
         self.subscriptions.len()
+    }
+
+    #[cfg(feature = "metrics")]
+    /// Returns a snapshot of the context's current metrics.
+    pub fn metrics_snapshot(&self) -> ContextMetricsSnapshot {
+        let mut total_packets_received = 0u64;
+        let mut total_bytes_received = 0u64;
+        let mut total_would_block_count = 0u64;
+        let mut total_receive_errors = 0u64;
+        let mut joined_subscriptions = 0usize;
+
+        for subscription in &self.subscriptions {
+            let snapshot = subscription.metrics_snapshot();
+            total_packets_received += snapshot.packets_received;
+            total_bytes_received += snapshot.bytes_received;
+            total_would_block_count += snapshot.would_block_count;
+            total_receive_errors += snapshot.receive_errors;
+            if subscription.is_joined() {
+                joined_subscriptions += 1;
+            }
+        }
+
+        ContextMetricsSnapshot {
+            subscriptions_added: self.metrics.subscriptions_added.get(),
+            subscriptions_removed: self.metrics.subscriptions_removed.get(),
+            active_subscriptions: self.subscriptions.len(),
+            joined_subscriptions,
+            total_packets_received,
+            total_bytes_received,
+            total_would_block_count,
+            total_receive_errors,
+            total_join_count: self.metrics.total_join_count.get(),
+            total_leave_count: self.metrics.total_leave_count.get(),
+            batch_calls: self.metrics.batch_calls.get(),
+            batch_packets_received: self.metrics.batch_packets_received.get(),
+            captured_at: SystemTime::now(),
+        }
     }
 
     /// Returns true if a subscription with the given ID exists.
@@ -76,6 +135,11 @@ impl Context {
         let subscription = Subscription::new(id, config, socket);
         self.subscriptions.push(subscription);
 
+        #[cfg(feature = "metrics")]
+        self.metrics
+            .subscriptions_added
+            .set(self.metrics.subscriptions_added.get() + 1);
+
         Ok(id)
     }
 
@@ -99,6 +163,11 @@ impl Context {
                 self.next_recv_index %= self.subscriptions.len();
             }
 
+            #[cfg(feature = "metrics")]
+            self.metrics
+                .subscriptions_removed
+                .set(self.metrics.subscriptions_removed.get() + 1);
+
             true
         } else {
             false
@@ -118,6 +187,11 @@ impl Context {
         join_multicast_group(subscription.socket(), subscription.config())?;
         subscription.mark_joined()?;
 
+        #[cfg(feature = "metrics")]
+        self.metrics
+            .total_join_count
+            .set(self.metrics.total_join_count.get() + 1);
+
         Ok(())
     }
 
@@ -133,6 +207,11 @@ impl Context {
 
         leave_multicast_group(subscription.socket(), subscription.config())?;
         subscription.mark_bound()?;
+
+        #[cfg(feature = "metrics")]
+        self.metrics
+            .total_leave_count
+            .set(self.metrics.total_leave_count.get() + 1);
 
         Ok(())
     }
@@ -189,6 +268,11 @@ impl Context {
     ) -> Result<usize, McrxError> {
         let mut received = 0;
 
+        #[cfg(feature = "metrics")]
+        self.metrics
+            .batch_calls
+            .set(self.metrics.batch_calls.get() + 1);
+
         for _ in 0..max_packets {
             match self.try_recv_any()? {
                 Some(packet) => {
@@ -198,6 +282,11 @@ impl Context {
                 None => break,
             }
         }
+
+        #[cfg(feature = "metrics")]
+        self.metrics
+            .batch_packets_received
+            .set(self.metrics.batch_packets_received.get() + received as u64);
 
         Ok(received)
     }

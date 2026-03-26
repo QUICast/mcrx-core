@@ -1,6 +1,8 @@
 pub mod config;
 pub mod context;
 pub mod error;
+#[cfg(feature = "metrics")]
+pub mod metrics;
 pub mod packet;
 mod platform;
 pub mod subscription;
@@ -10,3 +12,9 @@ pub use context::Context;
 pub use error::McrxError;
 pub use packet::Packet;
 pub use subscription::{Subscription, SubscriptionId};
+
+#[cfg(feature = "metrics")]
+pub use metrics::{
+    ContextMetricsDelta, ContextMetricsSampler, ContextMetricsSnapshot, SubscriptionMetricsDelta,
+    SubscriptionMetricsSampler, SubscriptionMetricsSnapshot,
+};

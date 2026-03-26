@@ -4,6 +4,8 @@ use std::net::Ipv4Addr;
 use std::process;
 use std::thread;
 use std::time::Duration;
+#[cfg(feature = "metrics")]
+use std::time::Instant;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const MAX_PREVIEW_LEN: usize = 64;
@@ -70,6 +72,11 @@ fn run() -> Result<(), String> {
     println!();
     println!("waiting for packets ...");
 
+    #[cfg(feature = "metrics")]
+    let summary_interval = summary_interval_from_env();
+    #[cfg(feature = "metrics")]
+    let mut next_summary_at = summary_interval.map(|interval| Instant::now() + interval);
+
     loop {
         match ctx
             .try_recv_any()
@@ -89,6 +96,13 @@ fn run() -> Result<(), String> {
             }
             None => {
                 thread::sleep(POLL_INTERVAL);
+            }
+        }
+        #[cfg(feature = "metrics")]
+        if let (Some(interval), Some(deadline)) = (summary_interval, next_summary_at) {
+            if Instant::now() >= deadline {
+                print_metrics_summary(&ctx);
+                next_summary_at = Some(Instant::now() + interval);
             }
         }
     }
@@ -153,6 +167,45 @@ fn truncate_preview(text: &str, max_len: usize) -> String {
 
     let truncated: String = text.chars().take(max_len).collect();
     format!("{truncated}...")
+}
+
+#[cfg(feature = "metrics")]
+fn summary_interval_from_env() -> Option<Duration> {
+    let raw = std::env::var("MCRX_METRICS_SUMMARY_SECS").ok()?;
+    let secs = raw.parse::<u64>().ok()?;
+    if secs == 0 {
+        None
+    } else {
+        Some(Duration::from_secs(secs))
+    }
+}
+
+#[cfg(feature = "metrics")]
+fn print_metrics_summary(ctx: &Context) {
+    let metrics = ctx.metrics_snapshot();
+
+    println!("[metrics]");
+    println!("  active_subscriptions:  {}", metrics.active_subscriptions);
+    println!("  joined_subscriptions:  {}", metrics.joined_subscriptions);
+    println!("  subscriptions_added:   {}", metrics.subscriptions_added);
+    println!("  subscriptions_removed: {}", metrics.subscriptions_removed);
+    println!(
+        "  total_packets:         {}",
+        metrics.total_packets_received
+    );
+    println!("  total_bytes:           {}", metrics.total_bytes_received);
+    println!(
+        "  total_would_block:     {}",
+        metrics.total_would_block_count
+    );
+    println!("  total_recv_errors:     {}", metrics.total_receive_errors);
+    println!("  joins:                 {}", metrics.total_join_count);
+    println!("  leaves:                {}", metrics.total_leave_count);
+    println!("  batch_calls:           {}", metrics.batch_calls);
+    println!(
+        "  batch_packets:         {}",
+        metrics.batch_packets_received
+    );
 }
 
 fn print_usage(program: &str) {

@@ -1,9 +1,17 @@
 use crate::config::SubscriptionConfig;
 use crate::error::McrxError;
+#[cfg(feature = "metrics")]
+use crate::metrics::{SubscriptionMetricsDelta, SubscriptionMetricsSnapshot};
 use crate::packet::Packet;
 use bytes::Bytes;
 use socket2::Socket;
+#[cfg(feature = "metrics")]
+use std::cell::{Cell, RefCell};
 use std::io::ErrorKind;
+#[cfg(feature = "metrics")]
+use std::net::SocketAddr;
+#[cfg(feature = "metrics")]
+use std::time::SystemTime;
 
 /// Identifies a subscription within a context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -21,6 +29,20 @@ pub enum SubscriptionState {
     Joined,
 }
 
+#[cfg(feature = "metrics")]
+#[derive(Debug, Default)]
+struct SubscriptionMetricsInner {
+    packets_received: Cell<u64>,
+    bytes_received: Cell<u64>,
+    would_block_count: Cell<u64>,
+    receive_errors: Cell<u64>,
+    join_count: Cell<u64>,
+    leave_count: Cell<u64>,
+    last_payload_len: Cell<Option<usize>>,
+    last_source: RefCell<Option<SocketAddr>>,
+    last_receive_at: RefCell<Option<SystemTime>>,
+}
+
 /// Represents a registered subscription stored inside a context.
 #[derive(Debug)]
 pub struct Subscription {
@@ -28,6 +50,8 @@ pub struct Subscription {
     config: SubscriptionConfig,
     socket: Socket,
     state: SubscriptionState,
+    #[cfg(feature = "metrics")]
+    metrics: SubscriptionMetricsInner,
 }
 
 impl Subscription {
@@ -38,6 +62,8 @@ impl Subscription {
             config,
             socket,
             state: SubscriptionState::Bound,
+            #[cfg(feature = "metrics")]
+            metrics: SubscriptionMetricsInner::default(),
         }
     }
 
@@ -84,6 +110,19 @@ impl Subscription {
                 let payload_bytes =
                     unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, len) };
 
+                #[cfg(feature = "metrics")]
+                {
+                    self.metrics
+                        .packets_received
+                        .set(self.metrics.packets_received.get() + 1);
+                    self.metrics
+                        .bytes_received
+                        .set(self.metrics.bytes_received.get() + len as u64);
+                    self.metrics.last_payload_len.set(Some(len));
+                    *self.metrics.last_source.borrow_mut() = Some(source);
+                    *self.metrics.last_receive_at.borrow_mut() = Some(SystemTime::now());
+                }
+
                 let packet = Packet {
                     subscription_id: self.id,
                     source,
@@ -95,9 +134,23 @@ impl Subscription {
                 Ok(Some(packet))
             }
 
-            Err(err) if err.kind() == ErrorKind::WouldBlock => Ok(None),
+            Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                #[cfg(feature = "metrics")]
+                self.metrics
+                    .would_block_count
+                    .set(self.metrics.would_block_count.get() + 1);
 
-            Err(err) => Err(McrxError::ReceiveFailed(err)),
+                Ok(None)
+            }
+
+            Err(err) => {
+                #[cfg(feature = "metrics")]
+                self.metrics
+                    .receive_errors
+                    .set(self.metrics.receive_errors.get() + 1);
+
+                Err(McrxError::ReceiveFailed(err))
+            }
         }
     }
 
@@ -116,6 +169,26 @@ impl Subscription {
     /// currently joined to its multicast group or only bound.
     pub fn state(&self) -> SubscriptionState {
         self.state
+    }
+
+    #[cfg(feature = "metrics")]
+    /// Returns a snapshot of the subscription's current metrics.
+    ///
+    /// Counter values in the returned snapshot are cumulative and can be
+    /// compared against a later snapshot using `delta_since()`.
+    pub fn metrics_snapshot(&self) -> SubscriptionMetricsSnapshot {
+        SubscriptionMetricsSnapshot {
+            packets_received: self.metrics.packets_received.get(),
+            bytes_received: self.metrics.bytes_received.get(),
+            would_block_count: self.metrics.would_block_count.get(),
+            receive_errors: self.metrics.receive_errors.get(),
+            join_count: self.metrics.join_count.get(),
+            leave_count: self.metrics.leave_count.get(),
+            last_payload_len: self.metrics.last_payload_len.get(),
+            last_source: self.metrics.last_source.borrow().clone(),
+            last_receive_at: self.metrics.last_receive_at.borrow().clone(),
+            captured_at: SystemTime::now(),
+        }
     }
 
     /// Returns `true` if the subscription is currently joined to its multicast group.
@@ -138,6 +211,12 @@ impl Subscription {
         }
 
         self.state = SubscriptionState::Joined;
+
+        #[cfg(feature = "metrics")]
+        self.metrics
+            .join_count
+            .set(self.metrics.join_count.get() + 1);
+
         Ok(())
     }
 
@@ -153,6 +232,12 @@ impl Subscription {
         }
 
         self.state = SubscriptionState::Bound;
+
+        #[cfg(feature = "metrics")]
+        self.metrics
+            .leave_count
+            .set(self.metrics.leave_count.get() + 1);
+
         Ok(())
     }
 }

@@ -4,6 +4,10 @@ version = "0.1.1"
 edition = "2024"
 license = "BSD-2-Clause"
 
+[features]
+default = []
+metrics = []
+
 [dependencies]
 socket2 = "0.5"
 bytes = "1"
