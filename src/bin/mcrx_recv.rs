@@ -58,6 +58,7 @@ fn run() -> Result<(), String> {
     let subscription_id = ctx
         .add_subscription(config)
         .map_err(|err| format!("failed to add subscription: {err}"))?;
+    ctx.join_subscription(subscription_id).unwrap();
 
     println!("mcrx-recv ready");
     println!("  group:      {group}");
