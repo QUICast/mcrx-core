@@ -12,9 +12,25 @@ pub enum McrxError {
     #[error("MCRX: group must be a multicast IPv4 address")]
     InvalidMulticastGroup,
 
+    /// The configured SSM source address is invalid.
+    #[error("MCRX: invalid source address")]
+    InvalidSourceAddress,
+
     /// A subscription with the same configuration already exists.
     #[error("MCRX: subscription already exists")]
     DuplicateSubscription,
+
+    /// No subscription with the requested ID exists.
+    #[error("MCRX: subscription not found")]
+    SubscriptionNotFound,
+
+    /// The subscription is not currently joined to its multicast group.
+    #[error("MCRX: subscription not joined")]
+    SubscriptionNotJoined,
+
+    /// The subscription is already joined to its multicast group.
+    #[error("MCRX: subscription already joined")]
+    SubscriptionAlreadyJoined,
 
     /// Creating the UDP socket failed.
     #[error("MCRX: failed to create UDP socket: {0}")]
@@ -32,36 +48,35 @@ pub enum McrxError {
     #[error("MCRX: failed to join IPv4 multicast group: {0}")]
     MulticastJoinFailed(io::Error),
 
-    #[error("MCRX: source-specific multicast is not supported on this platform yet")]
+    /// Leaving an IPv4 multicast group failed.
+    #[error("MCRX: failed to leave multicast group: {0}")]
+    MulticastLeaveFailed(io::Error),
+
+    /// Source-specific multicast is not supported on this platform.
+    #[error("MCRX: source-specific multicast is not supported on this platform")]
     SourceSpecificMulticastUnsupported,
 
+    /// Binding the interface probe socket failed.
     #[error("MCRX: failed to bind interface probe socket: {0}")]
     InterfaceProbeBindFailed(io::Error),
 
+    /// Connecting the interface probe socket failed.
     #[error("MCRX: failed to connect interface probe socket: {0}")]
     InterfaceProbeConnectFailed(io::Error),
 
+    /// Reading the local address from the interface probe socket failed.
     #[error("MCRX: failed to read local address from interface probe socket: {0}")]
     InterfaceProbeLocalAddrFailed(io::Error),
 
-    #[error("MCRX: Received packet from non IP Socket Address")]
-    NonIpSocketAddress,
-
+    /// Discovering the local network interface failed.
     #[error("MCRX: failed to discover local interface: {0}")]
     InterfaceDiscoveryFailed(String),
 
+    /// The received packet came from a non-IP socket address.
+    #[error("MCRX: received packet from non-IP socket address")]
+    NonIpSocketAddress,
+
+    /// Receiving a packet failed.
     #[error("MCRX: receive failed: {0}")]
     ReceiveFailed(io::Error),
-
-    #[error("MCRX: Subscription not joined")]
-    SubscriptionNotJoined,
-
-    #[error("MCRX: subscription already joined")]
-    SubscriptionAlreadyJoined,
-
-    #[error("MCRX: failed to leave multicast group: {0}")]
-    MulticastLeaveFailed(std::io::Error),
-
-    #[error("MCRX: Subscription not found")]
-    SubscriptionNotFound,
 }

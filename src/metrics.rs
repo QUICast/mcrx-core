@@ -1,7 +1,6 @@
 use std::net::SocketAddr;
 use std::time::SystemTime;
 
-#[cfg(feature = "metrics")]
 /// Computes an average per-second rate for a monotonically increasing counter.
 fn rate_per_sec(count: u64, interval_secs: f64) -> f64 {
     if interval_secs > 0.0 {
@@ -265,7 +264,6 @@ impl ContextMetricsDelta {
     }
 }
 
-#[cfg(feature = "metrics")]
 /// Tracks successive context metrics snapshots and computes deltas between them.
 ///
 /// The first call to `sample()` stores the provided snapshot and returns `None`,
@@ -273,6 +271,7 @@ impl ContextMetricsDelta {
 ///
 /// Each subsequent call compares the new snapshot against the previous one,
 /// updates the stored baseline, and returns the computed delta.
+#[cfg(feature = "metrics")]
 #[derive(Debug, Default, Clone)]
 pub struct ContextMetricsSampler {
     previous: Option<ContextMetricsSnapshot>,
@@ -318,33 +317,15 @@ impl ContextMetricsSampler {
 #[cfg(all(test, feature = "metrics"))]
 mod tests {
     use super::*;
-    use crate::{Context, Packet, SourceFilter, SubscriptionConfig};
-    use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
+    use crate::Context;
+    use crate::test_support::{make_multicast_sender, recv_next_packet, sample_config};
+
+    use std::net::SocketAddrV4;
     use std::thread;
     use std::time::{Duration, Instant};
 
-    fn sample_config(port: u16) -> SubscriptionConfig {
-        SubscriptionConfig {
-            group: Ipv4Addr::new(239, 1, 2, 3),
-            source: SourceFilter::Any,
-            dst_port: port,
-            interface: None,
-        }
-    }
-
-    fn recv_next_packet(context: &mut Context, deadline: Instant) -> Packet {
-        loop {
-            match context.try_recv_any().unwrap() {
-                Some(packet) => return packet,
-                None if Instant::now() < deadline => {
-                    thread::sleep(Duration::from_millis(10));
-                }
-                None => panic!("timed out waiting for packet"),
-            }
-        }
-    }
-
-    fn context_snapshot(
+    // Test helper: uses fixed non-zero values for unrelated fields.
+    fn make_context_snapshot(
         total_packets_received: u64,
         total_bytes_received: u64,
         total_would_block_count: u64,
@@ -369,7 +350,8 @@ mod tests {
         }
     }
 
-    fn subscription_snapshot(
+    // Test helper: uses fixed non-zero values for unrelated fields.
+    fn make_subscription_snapshot(
         packets_received: u64,
         bytes_received: u64,
         would_block_count: u64,
@@ -392,7 +374,7 @@ mod tests {
 
     #[test]
     fn context_metrics_sampler_returns_none_on_first_sample() {
-        let snapshot = context_snapshot(10, 1000, 2, 0, 3, 10);
+        let snapshot = make_context_snapshot(10, 1000, 2, 0, 3, 10);
 
         let mut sampler = ContextMetricsSampler::new();
         let delta = sampler.sample(snapshot);
@@ -402,11 +384,11 @@ mod tests {
 
     #[test]
     fn context_metrics_sampler_returns_delta_on_second_sample() {
-        let earlier = context_snapshot(10, 1000, 2, 0, 3, 10);
+        let earlier = make_context_snapshot(10, 1000, 2, 0, 3, 10);
 
         thread::sleep(Duration::from_millis(10));
 
-        let later = context_snapshot(15, 1600, 3, 1, 5, 15);
+        let later = make_context_snapshot(15, 1600, 3, 1, 5, 15);
 
         let mut sampler = ContextMetricsSampler::new();
         assert!(sampler.sample(earlier).is_none());
@@ -426,7 +408,7 @@ mod tests {
 
     #[test]
     fn subscription_metrics_sampler_returns_none_on_first_sample() {
-        let snapshot = subscription_snapshot(10, 1000, 2, 0, Some(100));
+        let snapshot = make_subscription_snapshot(10, 1000, 2, 0, Some(100));
 
         let mut sampler = SubscriptionMetricsSampler::new();
         let delta = sampler.sample(snapshot);
@@ -436,11 +418,11 @@ mod tests {
 
     #[test]
     fn subscription_metrics_sampler_returns_delta_on_second_sample() {
-        let earlier = subscription_snapshot(10, 1000, 2, 0, Some(100));
+        let earlier = make_subscription_snapshot(10, 1000, 2, 0, Some(100));
 
         thread::sleep(Duration::from_millis(10));
 
-        let later = subscription_snapshot(12, 1300, 3, 1, Some(150));
+        let later = make_subscription_snapshot(12, 1300, 3, 1, Some(150));
 
         let mut sampler = SubscriptionMetricsSampler::new();
         assert!(sampler.sample(earlier).is_none());
@@ -485,9 +467,7 @@ mod tests {
         let id = context.add_subscription(config.clone()).unwrap();
         context.join_subscription(id).unwrap();
 
-        let sender = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)).unwrap();
-        sender.set_multicast_loop_v4(true).unwrap();
-        sender.set_multicast_ttl_v4(1).unwrap();
+        let sender = make_multicast_sender();
 
         let payload = b"metrics-packet";
         sender
@@ -519,9 +499,7 @@ mod tests {
 
         let earlier = context.metrics_snapshot();
 
-        let sender = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)).unwrap();
-        sender.set_multicast_loop_v4(true).unwrap();
-        sender.set_multicast_ttl_v4(1).unwrap();
+        let sender = make_multicast_sender();
 
         let payload = b"delta-metrics";
         sender

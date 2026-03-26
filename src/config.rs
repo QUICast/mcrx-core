@@ -5,13 +5,16 @@ use std::net::Ipv4Addr;
 /// should be accepted for a multicast group.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceFilter {
-    /// Accept packets from any source. This corresponds to ASM `(*, G)`.
+    /// Accept packets from any source (Any-Source Multicast, `(*, G)`).
     Any,
-    /// Accept packets only from one specific source. This corresponds to SSM `(S, G)`.
+    /// Accept packets only from one specific source (Source-Specific Multicast, `(S, G)`).
     Source(Ipv4Addr),
 }
 
-/// Configuration used to create a multicast receive subscription.
+/// Configuration for a multicast receive subscription.
+///
+/// This defines the multicast group, source filtering mode (ASM or SSM),
+/// destination port, and optionally the local interface to join on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubscriptionConfig {
     /// The destination multicast group to join.
@@ -35,7 +38,33 @@ impl SubscriptionConfig {
             return Err(McrxError::InvalidMulticastGroup);
         }
 
+        if let SourceFilter::Source(source) = self.source
+            && source.is_multicast()
+        {
+            return Err(McrxError::InvalidSourceAddress);
+        }
+
         Ok(())
+    }
+
+    /// Creates an ASM (`(*, G)`) subscription configuration.
+    pub fn asm(group: Ipv4Addr, port: u16) -> Self {
+        Self {
+            group,
+            source: SourceFilter::Any,
+            dst_port: port,
+            interface: None,
+        }
+    }
+
+    /// Creates an SSM (`(S, G)`) subscription configuration.
+    pub fn ssm(group: Ipv4Addr, source: Ipv4Addr, port: u16) -> Self {
+        Self {
+            group,
+            source: SourceFilter::Source(source),
+            dst_port: port,
+            interface: None,
+        }
     }
 }
 
@@ -81,5 +110,19 @@ mod tests {
         let result = cfg.validate();
 
         assert!(matches!(result, Err(McrxError::InvalidMulticastGroup)));
+    }
+
+    #[test]
+    fn multicast_source_fails_validation() {
+        let cfg = SubscriptionConfig {
+            group: Ipv4Addr::new(232, 1, 2, 3),
+            source: SourceFilter::Source(Ipv4Addr::new(239, 1, 1, 1)),
+            dst_port: 5000,
+            interface: None,
+        };
+
+        let result = cfg.validate();
+
+        assert!(matches!(result, Err(McrxError::InvalidSourceAddress)));
     }
 }

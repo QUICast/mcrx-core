@@ -1,7 +1,7 @@
 use crate::config::SubscriptionConfig;
 use crate::error::McrxError;
 #[cfg(feature = "metrics")]
-use crate::metrics::{SubscriptionMetricsDelta, SubscriptionMetricsSnapshot};
+use crate::metrics::SubscriptionMetricsSnapshot;
 use crate::packet::Packet;
 use bytes::Bytes;
 use socket2::Socket;
@@ -23,9 +23,9 @@ pub struct SubscriptionId(pub u64);
 /// currently be joined to a multicast group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubscriptionState {
-    /// Socket is bound but multicast group is not joined
+    /// Socket is bound but multicast group is not joined.
     Bound,
-    /// Multicast group is joined
+    /// Multicast group is joined.
     Joined,
 }
 
@@ -82,19 +82,19 @@ impl Subscription {
         &self.socket
     }
 
-    /// Uses a `MaybeUninit<u8>` buffer because `socket2::Socket::recv_from` may
-    /// write into uninitialized memory.
-    ///
-    /// After `recv_from` returns `len`, only the first `len` bytes are assumed to
-    /// be initialized by the OS. Those bytes are then reinterpreted as `&[u8]`
-    /// for copying into the packet payload.
-    ///
     /// Attempts to receive a single packet without blocking.
     ///
     /// Returns:
     /// - `Ok(Some(packet))` if a packet was received,
     /// - `Ok(None)` if no packet is currently available,
     /// - `Err(...)` on an actual receive failure.
+    ///
+    /// Uses a `MaybeUninit<u8>` buffer because `socket2::Socket::recv_from` may
+    /// write into uninitialized memory.
+    ///
+    /// After `recv_from` returns `len`, only the first `len` bytes are assumed to
+    /// be initialized by the OS. Those bytes are then reinterpreted as `&[u8]`
+    /// for copying into the packet payload.
     pub fn try_recv(&self) -> Result<Option<Packet>, McrxError> {
         if !self.is_joined() {
             return Err(McrxError::SubscriptionNotJoined);
@@ -171,11 +171,11 @@ impl Subscription {
         self.state
     }
 
-    #[cfg(feature = "metrics")]
     /// Returns a snapshot of the subscription's current metrics.
     ///
     /// Counter values in the returned snapshot are cumulative and can be
     /// compared against a later snapshot using `delta_since()`.
+    #[cfg(feature = "metrics")]
     pub fn metrics_snapshot(&self) -> SubscriptionMetricsSnapshot {
         SubscriptionMetricsSnapshot {
             packets_received: self.metrics.packets_received.get(),
@@ -185,8 +185,8 @@ impl Subscription {
             join_count: self.metrics.join_count.get(),
             leave_count: self.metrics.leave_count.get(),
             last_payload_len: self.metrics.last_payload_len.get(),
-            last_source: self.metrics.last_source.borrow().clone(),
-            last_receive_at: self.metrics.last_receive_at.borrow().clone(),
+            last_source: *self.metrics.last_source.borrow(),
+            last_receive_at: *self.metrics.last_receive_at.borrow(),
             captured_at: SystemTime::now(),
         }
     }
@@ -247,18 +247,9 @@ mod tests {
     use super::*;
     use crate::config::{SourceFilter, SubscriptionConfig};
     use crate::platform;
+    use crate::test_support::{make_multicast_sender, sample_config};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
-    use std::thread;
     use std::time::{Duration, Instant};
-
-    fn test_config(port: u16) -> SubscriptionConfig {
-        SubscriptionConfig {
-            group: Ipv4Addr::new(239, 1, 2, 3),
-            source: SourceFilter::Any,
-            dst_port: port,
-            interface: None,
-        }
-    }
 
     fn test_ssm_config(port: u16, interface: Ipv4Addr) -> SubscriptionConfig {
         SubscriptionConfig {
@@ -281,9 +272,21 @@ mod tests {
         }
     }
 
+    fn recv_next_subscription_packet(subscription: &Subscription, deadline: Instant) -> Packet {
+        loop {
+            match subscription.try_recv().unwrap() {
+                Some(packet) => return packet,
+                None if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                None => panic!("timed out waiting for packet"),
+            }
+        }
+    }
+
     #[test]
     fn try_recv_returns_none_when_no_packet_is_available() {
-        let config = test_config(55020);
+        let config = sample_config(55020);
         let socket = platform::open_bound_socket(&config).unwrap();
         let mut subscription = Subscription::new(SubscriptionId(1), config, socket);
         platform::join_multicast_group(subscription.socket(), subscription.config()).unwrap();
@@ -296,7 +299,7 @@ mod tests {
 
     #[test]
     fn try_recv_receives_packet_sent_to_bound_port() {
-        let config = test_config(55021);
+        let config = sample_config(55021);
         let socket = platform::open_bound_socket(&config).unwrap();
         let mut subscription = Subscription::new(SubscriptionId(1), config.clone(), socket);
         platform::join_multicast_group(subscription.socket(), subscription.config()).unwrap();
@@ -313,35 +316,24 @@ mod tests {
             .unwrap();
 
         let deadline = Instant::now() + Duration::from_secs(1);
-        loop {
-            match subscription.try_recv().unwrap() {
-                Some(packet) => {
-                    assert_eq!(packet.subscription_id, SubscriptionId(1));
-                    assert_eq!(packet.group, IpAddr::V4(config.group));
-                    assert_eq!(packet.dst_port, config.dst_port);
-                    assert_eq!(&packet.payload[..], payload);
-                    assert_eq!(packet.source.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
-                    break;
-                }
-                None if Instant::now() < deadline => {
-                    thread::sleep(Duration::from_millis(10));
-                }
-                None => panic!("timed out waiting for packet"),
-            }
-        }
+        let packet = recv_next_subscription_packet(&subscription, deadline);
+
+        assert_eq!(packet.subscription_id, SubscriptionId(1));
+        assert_eq!(packet.group, IpAddr::V4(config.group));
+        assert_eq!(packet.dst_port, config.dst_port);
+        assert_eq!(&packet.payload[..], payload);
+        assert_eq!(packet.source.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
     }
 
     #[test]
     fn try_recv_receives_multicast_packet_from_joined_group() {
-        let config = test_config(55022);
+        let config = sample_config(55022);
         let socket = platform::open_bound_socket(&config).unwrap();
         let mut subscription = Subscription::new(SubscriptionId(1), config.clone(), socket);
         platform::join_multicast_group(subscription.socket(), subscription.config()).unwrap();
         subscription.mark_joined().unwrap();
 
-        let sender = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)).unwrap();
-        sender.set_multicast_loop_v4(true).unwrap();
-        sender.set_multicast_ttl_v4(1).unwrap();
+        let sender = make_multicast_sender();
 
         let sender_port = sender.local_addr().unwrap().port();
         let payload = b"hello real asm multicast";
@@ -351,22 +343,13 @@ mod tests {
             .unwrap();
 
         let deadline = Instant::now() + Duration::from_secs(1);
-        loop {
-            match subscription.try_recv().unwrap() {
-                Some(packet) => {
-                    assert_eq!(packet.subscription_id, SubscriptionId(1));
-                    assert_eq!(packet.group, IpAddr::V4(config.group));
-                    assert_eq!(packet.dst_port, config.dst_port);
-                    assert_eq!(&packet.payload[..], payload);
-                    assert_eq!(packet.source.port(), sender_port);
-                    break;
-                }
-                None if Instant::now() < deadline => {
-                    thread::sleep(Duration::from_millis(10));
-                }
-                None => panic!("timed out waiting for multicast packet"),
-            }
-        }
+        let packet = recv_next_subscription_packet(&subscription, deadline);
+
+        assert_eq!(packet.subscription_id, SubscriptionId(1));
+        assert_eq!(packet.group, IpAddr::V4(config.group));
+        assert_eq!(packet.dst_port, config.dst_port);
+        assert_eq!(&packet.payload[..], payload);
+        assert_eq!(packet.source.port(), sender_port);
     }
 
     #[test]
@@ -390,28 +373,19 @@ mod tests {
             .unwrap();
 
         let deadline = Instant::now() + Duration::from_secs(1);
-        loop {
-            match subscription.try_recv().unwrap() {
-                Some(packet) => {
-                    assert_eq!(packet.subscription_id, SubscriptionId(1));
-                    assert_eq!(packet.group, IpAddr::V4(config.group));
-                    assert_eq!(packet.dst_port, config.dst_port);
-                    assert_eq!(&packet.payload[..], payload);
-                    assert_eq!(packet.source.port(), sender_port);
-                    assert_eq!(packet.source.ip(), IpAddr::V4(interface));
-                    break;
-                }
-                None if Instant::now() < deadline => {
-                    thread::sleep(Duration::from_millis(10));
-                }
-                None => panic!("timed out waiting for SSM packet"),
-            }
-        }
+        let packet = recv_next_subscription_packet(&subscription, deadline);
+
+        assert_eq!(packet.subscription_id, SubscriptionId(1));
+        assert_eq!(packet.group, IpAddr::V4(config.group));
+        assert_eq!(packet.dst_port, config.dst_port);
+        assert_eq!(&packet.payload[..], payload);
+        assert_eq!(packet.source.port(), sender_port);
+        assert_eq!(packet.source.ip(), IpAddr::V4(interface));
     }
 
     #[test]
-    fn mark_joined_transitions_bound_to_joined() {
-        let config = test_config(55024);
+    fn mark_joined_transitions_bound_to_joined_state() {
+        let config = sample_config(55024);
         let socket = platform::open_bound_socket(&config).unwrap();
         let mut subscription = Subscription::new(SubscriptionId(1), config, socket);
 
@@ -422,7 +396,7 @@ mod tests {
 
     #[test]
     fn mark_joined_rejects_already_joined_subscription() {
-        let config = test_config(55025);
+        let config = sample_config(55025);
         let socket = platform::open_bound_socket(&config).unwrap();
         let mut subscription = Subscription::new(SubscriptionId(1), config, socket);
 
@@ -433,8 +407,8 @@ mod tests {
     }
 
     #[test]
-    fn mark_bound_transitions_joined_to_bound() {
-        let config = test_config(55026);
+    fn mark_bound_transitions_joined_to_bound_state() {
+        let config = sample_config(55026);
         let socket = platform::open_bound_socket(&config).unwrap();
         let mut subscription = Subscription::new(SubscriptionId(1), config, socket);
 
@@ -446,7 +420,7 @@ mod tests {
 
     #[test]
     fn mark_bound_rejects_already_bound_subscription() {
-        let config = test_config(55027);
+        let config = sample_config(55027);
         let socket = platform::open_bound_socket(&config).unwrap();
         let mut subscription = Subscription::new(SubscriptionId(1), config, socket);
 

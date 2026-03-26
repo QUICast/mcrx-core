@@ -5,7 +5,7 @@ use crate::platform::{join_multicast_group, leave_multicast_group, open_bound_so
 use crate::subscription::{Subscription, SubscriptionId};
 
 #[cfg(feature = "metrics")]
-use crate::metrics::{ContextMetricsDelta, ContextMetricsSnapshot};
+use crate::metrics::ContextMetricsSnapshot;
 #[cfg(feature = "metrics")]
 use std::cell::Cell;
 #[cfg(feature = "metrics")]
@@ -49,8 +49,9 @@ impl Context {
         self.subscriptions.len()
     }
 
-    #[cfg(feature = "metrics")]
     /// Returns a snapshot of the context's current metrics.
+    /// total_packets_received and similar totals reflect currently active subscriptions only.
+    #[cfg(feature = "metrics")]
     pub fn metrics_snapshot(&self) -> ContextMetricsSnapshot {
         let mut total_packets_received = 0u64;
         let mut total_bytes_received = 0u64;
@@ -106,6 +107,7 @@ impl Context {
             .iter_mut()
             .find(|subscription| subscription.id() == id)
     }
+
     /// Adds a new subscription to the context.
     ///
     /// The configuration is validated before insertion. If an identical subscription
@@ -221,11 +223,13 @@ impl Context {
         &self.subscriptions
     }
 
-    /// Attempts to receive a single packet from any subscription without blocking.
-    /// Uses round-robin style fairness across the different subscriptions.
+    /// Attempts to receive a single packet from any joined subscription without blocking.
     ///
-    /// Returns the first available packet, if any subscription currently has one
-    /// ready to be read.
+    /// Subscriptions are scanned using round-robin style fairness so that repeated
+    /// calls do not always favor the first subscription.
+    ///
+    /// Returns the first available packet, if any joined subscription currently has
+    /// one ready to be read.
     pub fn try_recv_any(&mut self) -> Result<Option<Packet>, McrxError> {
         let subscription_count = self.subscriptions.len();
 
@@ -296,8 +300,9 @@ impl Context {
     /// This is a convenience wrapper around `try_recv_batch_into` that continues
     /// draining until no more packets are available.
     ///
-    /// Note: this may result in unbounded growth of `out` if a large number of
-    /// packets are queued, so callers should ensure capacity if needed.
+    /// Note: this only drains packets that are currently available without blocking.
+    /// It may result in unbounded growth of `out` if a large number of packets are queued,
+    /// so callers should ensure capacity if needed.
     pub fn try_recv_all_into(&mut self, out: &mut Vec<Packet>) -> Result<usize, McrxError> {
         let mut total_received = 0;
 
@@ -319,38 +324,17 @@ mod tests {
     use super::*;
     use crate::config::SourceFilter;
     use crate::subscription::SubscriptionState;
-    use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
+    use std::net::{Ipv4Addr, SocketAddrV4};
     use std::thread;
     use std::time::{Duration, Instant};
 
-    fn sample_config(port: u16) -> SubscriptionConfig {
-        SubscriptionConfig {
-            group: Ipv4Addr::new(239, 1, 2, 3),
-            source: SourceFilter::Any,
-            dst_port: port,
-            interface: None,
-        }
-    }
-
-    fn recv_next_packet(context: &mut Context, deadline: Instant) -> Packet {
-        loop {
-            match context.try_recv_any().unwrap() {
-                Some(packet) => return packet,
-                None if Instant::now() < deadline => {
-                    thread::sleep(Duration::from_millis(10));
-                }
-                None => panic!("timed out waiting for packet"),
-            }
-        }
-    }
+    use crate::test_support::{make_multicast_sender, recv_next_packet, sample_config};
 
     fn send_round_robin_test_packets(
         first_config: &SubscriptionConfig,
         second_config: &SubscriptionConfig,
     ) {
-        let sender = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)).unwrap();
-        sender.set_multicast_loop_v4(true).unwrap();
-        sender.set_multicast_ttl_v4(1).unwrap();
+        let sender = make_multicast_sender();
 
         sender
             .send_to(
@@ -442,7 +426,7 @@ mod tests {
     }
 
     #[test]
-    fn three_subscriotions_have_len_3() {
+    fn three_subscriptions_have_len_3() {
         let mut context = Context::new();
 
         context.add_subscription(sample_config(6000)).unwrap();
@@ -538,9 +522,7 @@ mod tests {
         let id = context.add_subscription(config.clone()).unwrap();
         context.join_subscription(id).unwrap();
 
-        let sender = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)).unwrap();
-        sender.set_multicast_loop_v4(true).unwrap();
-        sender.set_multicast_ttl_v4(1).unwrap();
+        let sender = make_multicast_sender();
 
         let payload = b"context try_recv_any";
         sender
@@ -548,20 +530,11 @@ mod tests {
             .unwrap();
 
         let deadline = Instant::now() + Duration::from_secs(1);
-        loop {
-            match context.try_recv_any().unwrap() {
-                Some(packet) => {
-                    assert_eq!(packet.group, std::net::IpAddr::V4(config.group));
-                    assert_eq!(packet.dst_port, config.dst_port);
-                    assert_eq!(&packet.payload[..], payload);
-                    break;
-                }
-                None if Instant::now() < deadline => {
-                    thread::sleep(Duration::from_millis(10));
-                }
-                None => panic!("timed out waiting for packet from context"),
-            }
-        }
+        let packet = recv_next_packet(&mut context, deadline);
+
+        assert_eq!(packet.group, std::net::IpAddr::V4(config.group));
+        assert_eq!(packet.dst_port, config.dst_port);
+        assert_eq!(&packet.payload[..], payload);
     }
 
     #[test]
