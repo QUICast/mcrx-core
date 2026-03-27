@@ -1,7 +1,6 @@
 # mcrx-core
 
-A portable multicast receiver library with support for ASM (*Any-Source Multicast*) and SSM (*Source-Specific
-Multicast*).
+A portable multicast receiver library with support for ASM (*Any-Source Multicast*) and SSM (*Source-Specific Multicast*).
 
 Designed to be:
 
@@ -19,95 +18,60 @@ Designed to be:
 - Non-blocking receive API
 - Multiple concurrent subscriptions
 - Zero-copy-friendly payload handling via `bytes::Bytes`
-- Cross-platform design (platform quirks handled internally)
-
----
-
-## 📐 Architecture Overview
-
-```
-Context
- └── Subscriptions (Vec)
-       └── Subscription
-             └── Socket (OS / socket2)
-                   └── Packet (output)
-```
-
-### Flow
-
-1. A `Context` manages multiple multicast subscriptions
-2. Each `Subscription` owns a socket joined to a multicast group
-3. Incoming UDP packets are received via `try_recv()`
-4. Packets are returned as `Packet` structs with metadata + payload
+- Cross-platform design
+- Explicit subscription lifecycle (`add`, `join`, `leave`, `remove`)
+- Optional metrics with snapshots, deltas, and rate helpers
 
 ---
 
 ## 🚀 Quick Example
 
 ```rust
-use mcrx_core::{Context, SubscriptionConfig, SourceFilter};
+use mcrx_core::{Context, SubscriptionConfig};
 use std::net::Ipv4Addr;
 
 let mut ctx = Context::new();
 
-let config = SubscriptionConfig {
-group: Ipv4Addr::new(239, 1, 2, 3),
-source: SourceFilter::Any,
-dst_port: 5000,
-interface: None,
-};
+let config = SubscriptionConfig::asm(
+    Ipv4Addr::new(239, 1, 2, 3),
+    5000,
+);
 
-let _id = ctx.add_subscription(config) ?;
+let id = ctx.add_subscription(config)?;
+ctx.join_subscription(id)?;
 
-// Non-blocking receive
-if let Some(packet) = ctx.try_recv_any() ? {
-println ! ("Received {} bytes from {}", packet.payload.len(), packet.source);
+if let Some(packet) = ctx.try_recv_any()? {
+    println!("Received {} bytes", packet.payload.len());
 }
 ```
 
 ---
 
+## 📚 Documentation
+
+- [Architecture](docs/architecture.md)
+- [Usage Guide](docs/usage.md)
+- [Demo Binaries](docs/demo.md)
+- [Metrics](docs/metrics.md)
+- [Design Decisions](docs/design-decisions.md)
+
 ---
 
 ## 🧪 Demo Binaries
 
-### Receiver
+Receiver:
 
 ```bash
 cargo run --bin mcrx_recv -- 239.1.2.3 5000
-cargo run --bin mcrx_recv -- 232.1.2.3 5000 192.168.1.10
-cargo run --bin mcrx_recv -- 232.1.2.3 5000 192.168.1.10 192.168.1.20
 ```
 
-- omit `source` for ASM
-- provide `source` for SSM
-- `interface` is optional and selects the local join interface
-
----
-
-### Sender
+Sender:
 
 ```bash
 cargo run --bin mcrx_send -- 239.1.2.3 5000 hello
-cargo run --bin mcrx_send -- 239.1.2.3 5000 hello 1000
-cargo run --bin mcrx_send -- 232.1.2.3 5000 hello 1000 192.168.1.20
 ```
 
-- optional `interval_ms` enables periodic sending
-- optional `interface` selects the outgoing interface
-
----
-
-## 🔄 Receive Model
-
-- `try_recv()` → per subscription
-- `try_recv_any()` → across all subscriptions
-
-Returns:
-
-- `Ok(Some(packet))` → packet received
-- `Ok(None)` → no packet available
-- `Err(...)` → actual error
+See [docs/demo.md](docs/demo.md) for full CLI and metrics documentation.
 
 ---
 
@@ -153,23 +117,6 @@ Returns:
 
 ---
 
-## 🧰 Planned Additions
-
-- Linux validation
-- Windows validation
-- FFI bindings (C, Python)
-- IPv6 support (MLDv2 / SSM)
-
----
-
-## 🎯 Design Goals
-
-- No runtime dependency
-- Minimal unsafe usage (well-contained)
-- Clean architecture for integration
-
----
-
 ## 📄 License
 
-This project is licensed under the BSD 2-Clause License.
+BSD 2-Clause
