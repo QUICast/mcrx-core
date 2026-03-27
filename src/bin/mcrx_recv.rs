@@ -1,11 +1,21 @@
-use mcrx_core::{Context, SourceFilter, SubscriptionConfig};
+use mcrx_core::{Context, SubscriptionConfig};
+#[cfg(feature = "metrics")]
+use mcrx_core::{ContextMetricsDelta, ContextMetricsSampler, ContextMetricsSnapshot};
 use std::env;
+#[cfg(feature = "metrics")]
+use std::fs::OpenOptions;
+#[cfg(feature = "metrics")]
+use std::io::Write;
 use std::net::Ipv4Addr;
+#[cfg(feature = "metrics")]
+use std::path::PathBuf;
 use std::process;
+#[cfg(feature = "metrics")]
+use std::sync::Once;
 use std::thread;
 use std::time::Duration;
 #[cfg(feature = "metrics")]
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const MAX_PREVIEW_LEN: usize = 64;
@@ -44,23 +54,18 @@ fn run() -> Result<(), String> {
         return Err(format!("group address {group} is not multicast"));
     }
 
-    let source_filter = match source {
-        Some(source) => SourceFilter::Source(source),
-        None => SourceFilter::Any,
+    let mut config = match source {
+        Some(source) => SubscriptionConfig::ssm(group, source, dst_port),
+        None => SubscriptionConfig::asm(group, dst_port),
     };
-
-    let config = SubscriptionConfig {
-        group,
-        source: source_filter,
-        dst_port,
-        interface,
-    };
+    config.interface = interface;
 
     let mut ctx = Context::new();
     let subscription_id = ctx
         .add_subscription(config)
         .map_err(|err| format!("failed to add subscription: {err}"))?;
-    ctx.join_subscription(subscription_id).unwrap();
+    ctx.join_subscription(subscription_id)
+        .map_err(|err| format!("failed to join subscription: {err}"))?;
 
     println!("mcrx-recv ready");
     println!("  group:      {group}");
@@ -74,6 +79,12 @@ fn run() -> Result<(), String> {
 
     #[cfg(feature = "metrics")]
     let summary_interval = summary_interval_from_env();
+    #[cfg(feature = "metrics")]
+    let summary_file = summary_file_from_env();
+    #[cfg(feature = "metrics")]
+    let mut metrics_sampler = ContextMetricsSampler::new();
+    #[cfg(feature = "metrics")]
+    let _ = metrics_sampler.sample(ctx.metrics_snapshot());
     #[cfg(feature = "metrics")]
     let mut next_summary_at = summary_interval.map(|interval| Instant::now() + interval);
 
@@ -99,11 +110,19 @@ fn run() -> Result<(), String> {
             }
         }
         #[cfg(feature = "metrics")]
-        if let (Some(interval), Some(deadline)) = (summary_interval, next_summary_at) {
-            if Instant::now() >= deadline {
-                print_metrics_summary(&ctx);
-                next_summary_at = Some(Instant::now() + interval);
+        if let (Some(interval), Some(deadline)) = (summary_interval, next_summary_at)
+            && Instant::now() >= deadline
+        {
+            let snapshot = ctx.metrics_snapshot();
+            if let Some(delta) = metrics_sampler.sample(snapshot.clone()) {
+                if let Some(path) = &summary_file {
+                    write_metrics_summary_jsonl(&snapshot, &delta, path)
+                        .map_err(|err| format!("failed to write metrics summary: {err}"))?;
+                } else {
+                    print_metrics_summary(&snapshot, &delta);
+                }
             }
+            next_summary_at = Some(Instant::now() + interval);
         }
     }
 }
@@ -139,6 +158,7 @@ fn interface_string(interface: Option<Ipv4Addr>) -> String {
         None => "default".to_string(),
     }
 }
+
 fn format_payload(payload: &[u8]) -> String {
     match std::str::from_utf8(payload) {
         Ok(text) => truncate_preview(text, MAX_PREVIEW_LEN),
@@ -171,7 +191,7 @@ fn truncate_preview(text: &str, max_len: usize) -> String {
 
 #[cfg(feature = "metrics")]
 fn summary_interval_from_env() -> Option<Duration> {
-    let raw = std::env::var("MCRX_METRICS_SUMMARY_SECS").ok()?;
+    let raw = env::var("MCRX_METRICS_SUMMARY_SECS").ok()?;
     let secs = raw.parse::<u64>().ok()?;
     if secs == 0 {
         None
@@ -181,30 +201,106 @@ fn summary_interval_from_env() -> Option<Duration> {
 }
 
 #[cfg(feature = "metrics")]
-fn print_metrics_summary(ctx: &Context) {
-    let metrics = ctx.metrics_snapshot();
+fn summary_file_from_env() -> Option<PathBuf> {
+    let raw = env::var("MCRX_METRICS_SUMMARY_FILE").ok()?;
+    if raw.trim().is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(raw))
+    }
+}
 
+#[cfg(feature = "metrics")]
+fn unix_timestamp_secs(time: SystemTime) -> f64 {
+    time.duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+#[cfg(feature = "metrics")]
+fn write_metrics_summary_jsonl(
+    snapshot: &ContextMetricsSnapshot,
+    delta: &ContextMetricsDelta,
+    path: &PathBuf,
+) -> Result<(), std::io::Error> {
+    let timestamp_secs = unix_timestamp_secs(snapshot.captured_at);
+
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let _ = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(path);
+    });
+
+    let line = format!(
+        concat!(
+            "{{",
+            "\"ts\":{},",
+            "\"interval_secs\":{},",
+            "\"active_subscriptions\":{},",
+            "\"joined_subscriptions\":{},",
+            "\"packets_received\":{},",
+            "\"bytes_received\":{},",
+            "\"would_block_count\":{},",
+            "\"receive_errors\":{},",
+            "\"join_count\":{},",
+            "\"leave_count\":{},",
+            "\"batch_calls\":{},",
+            "\"batch_packets_received\":{},",
+            "\"packets_per_sec\":{},",
+            "\"bytes_per_sec\":{},",
+            "\"would_block_per_sec\":{},",
+            "\"receive_errors_per_sec\":{}",
+            "}}\n"
+        ),
+        timestamp_secs,
+        delta.interval_secs,
+        snapshot.active_subscriptions,
+        snapshot.joined_subscriptions,
+        delta.packets_received,
+        delta.bytes_received,
+        delta.would_block_count,
+        delta.receive_errors,
+        delta.join_count,
+        delta.leave_count,
+        delta.batch_calls,
+        delta.batch_packets_received,
+        delta.packets_per_sec(),
+        delta.bytes_per_sec(),
+        delta.would_block_per_sec(),
+        delta.receive_errors_per_sec(),
+    );
+
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    file.write_all(line.as_bytes())?;
+    Ok(())
+}
+
+#[cfg(feature = "metrics")]
+fn print_metrics_summary(snapshot: &ContextMetricsSnapshot, delta: &ContextMetricsDelta) {
     println!("[metrics]");
-    println!("  active_subscriptions:  {}", metrics.active_subscriptions);
-    println!("  joined_subscriptions:  {}", metrics.joined_subscriptions);
-    println!("  subscriptions_added:   {}", metrics.subscriptions_added);
-    println!("  subscriptions_removed: {}", metrics.subscriptions_removed);
+    println!("  interval_secs:         {:.3}", delta.interval_secs);
+    println!("  active_subscriptions:  {}", snapshot.active_subscriptions);
+    println!("  joined_subscriptions:  {}", snapshot.joined_subscriptions);
+    println!("  packets_received:      {}", delta.packets_received);
+    println!("  bytes_received:        {}", delta.bytes_received);
+    println!("  would_block_count:     {}", delta.would_block_count);
+    println!("  receive_errors:        {}", delta.receive_errors);
+    println!("  join_count:            {}", delta.join_count);
+    println!("  leave_count:           {}", delta.leave_count);
+    println!("  batch_calls:           {}", delta.batch_calls);
+    println!("  batch_packets:         {}", delta.batch_packets_received);
+    println!("  packets_per_sec:       {:.3}", delta.packets_per_sec());
+    println!("  bytes_per_sec:         {:.3}", delta.bytes_per_sec());
     println!(
-        "  total_packets:         {}",
-        metrics.total_packets_received
+        "  would_block_per_sec:   {:.3}",
+        delta.would_block_per_sec()
     );
-    println!("  total_bytes:           {}", metrics.total_bytes_received);
     println!(
-        "  total_would_block:     {}",
-        metrics.total_would_block_count
-    );
-    println!("  total_recv_errors:     {}", metrics.total_receive_errors);
-    println!("  joins:                 {}", metrics.total_join_count);
-    println!("  leaves:                {}", metrics.total_leave_count);
-    println!("  batch_calls:           {}", metrics.batch_calls);
-    println!(
-        "  batch_packets:         {}",
-        metrics.batch_packets_received
+        "  recv_errors_per_sec:   {:.3}",
+        delta.receive_errors_per_sec()
     );
 }
 
@@ -221,4 +317,14 @@ fn print_usage(program: &str) {
     eprintln!("  - omit <source> for ASM");
     eprintln!("  - provide <source> for SSM");
     eprintln!("  - <interface> is optional and selects the local join interface");
+
+    #[cfg(feature = "metrics")]
+    {
+        eprintln!();
+        eprintln!("Metrics (when built with --features metrics):");
+        eprintln!("  MCRX_METRICS_SUMMARY_SECS=<n>   emit a delta metrics summary every n seconds");
+        eprintln!(
+            "  MCRX_METRICS_SUMMARY_FILE=<p>   append JSONL delta metrics summaries to file <p>"
+        );
+    }
 }
