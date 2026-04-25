@@ -1,35 +1,42 @@
 # mcrx-core
 
-A portable multicast receiver library with support for ASM (*Any-Source Multicast*) and SSM (*Source-Specific Multicast*).
+`mcrx-core` is a runtime-agnostic and portable IPv4 multicast receiver library for ASM
+(`(*, G)`) and SSM (`(S, G)`).
 
-Designed to be:
+It is built for applications and integrations that want a small multicast
+receive core with explicit lifecycle and socket ownership control.
 
-- lightweight
-- runtime-agnostic
-- embeddable into larger systems (e.g. QUIC / quiche integrations)
-- extensible via FFI (C, Rust, Python bindings planned)
+## Highlights
 
----
-
-## ✨ Features
-
-- IPv4 ASM (`(*, G)`) support
-- IPv4 SSM (`(S, G)`) support
+- IPv4 ASM and SSM receive support
 - Non-blocking receive API
-- Multiple concurrent subscriptions
-- Caller-provided socket support via `add_subscription_with_socket()`
+- Explicit subscription lifecycle: `add`, `join`, `leave`, `remove`
+- Multiple concurrent subscriptions with fair receive across them
+- Caller-provided socket support
 - Event-loop friendly socket borrowing and extraction APIs
 - Optional Tokio adapter via the `tokio` feature
-- Structured receive metadata via `PacketWithMetadata`
-- IPv4 pktinfo-style destination/interface metadata on supported Unix and Windows platforms
-- Zero-copy-friendly payload handling via `bytes::Bytes`
-- Cross-platform design
-- Explicit subscription lifecycle (`add`, `join`, `leave`, `remove`)
-- Optional metrics with snapshots, deltas, and rate helpers
+- Optional receive metadata on platforms that expose it
+- Optional metrics via the `metrics` feature
 
----
+## Install
 
-## 🚀 Quick Example
+```bash
+cargo add mcrx-core
+```
+
+With the optional Tokio adapter:
+
+```bash
+cargo add mcrx-core --features tokio
+```
+
+With optional metrics:
+
+```bash
+cargo add mcrx-core --features metrics
+```
+
+## Quick Start
 
 ```rust
 use mcrx_core::{Context, SubscriptionConfig};
@@ -37,21 +44,19 @@ use std::net::Ipv4Addr;
 
 let mut ctx = Context::new();
 
-let config = SubscriptionConfig::asm(
-    Ipv4Addr::new(239, 1, 2, 3),
-    5000,
-);
+let config = SubscriptionConfig::asm(Ipv4Addr::new(239, 1, 2, 3), 5000);
+let id = ctx.add_subscription(config) ?;
+ctx.join_subscription(id) ?;
 
-let id = ctx.add_subscription(config)?;
-ctx.join_subscription(id)?;
-
-if let Some(packet) = ctx.try_recv_any()? {
-    println!("Received {} bytes", packet.payload.len());
+if let Some(packet) = ctx.try_recv_any() ? {
+println ! ("received {} bytes", packet.payload.len());
 }
 ```
 
-Using an existing bound socket is also supported when you need tighter control over
-socket creation or runtime integration:
+## Existing Sockets
+
+Use `add_subscription_with_socket()` when you need to create or bind the socket
+yourself:
 
 ```rust
 use mcrx_core::{Context, SubscriptionConfig};
@@ -61,16 +66,17 @@ use std::net::{Ipv4Addr, SocketAddrV4};
 let mut ctx = Context::new();
 let config = SubscriptionConfig::asm(Ipv4Addr::new(239, 1, 2, 3), 5000);
 
-let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-socket.set_reuse_address(true)?;
-socket.bind(&SockAddr::from(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 5000)))?;
+let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)) ?;
+socket.set_reuse_address(true) ?;
+socket.bind( & SockAddr::from(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 5000))) ?;
 
-let id = ctx.add_subscription_with_socket(config, socket)?;
-ctx.join_subscription(id)?;
+let id = ctx.add_subscription_with_socket(config, socket) ?;
+ctx.join_subscription(id) ?;
 ```
 
-For external event loops, you can either borrow the live socket from a
-subscription or take the whole subscription back out of the context:
+## Event Loop Integration
+
+Borrow the live socket from a subscription:
 
 ```rust
 let subscription = ctx.get_subscription(id).unwrap();
@@ -78,53 +84,54 @@ let socket = subscription.socket();
 
 #[cfg(unix)]
 let raw = subscription.as_raw_fd();
+```
 
-let owned = ctx.take_subscription(id).unwrap();
-let parts = owned.into_parts();
+Or extract the subscription and move it into another loop or runtime:
+
+```rust
+let subscription = ctx.take_subscription(id).unwrap();
+let parts = subscription.into_parts();
 let socket = parts.socket;
 ```
 
-With the optional Tokio adapter enabled, you can wrap an extracted subscription
-and await packets asynchronously:
+## Tokio Integration
+
+With the `tokio` feature enabled, you can wrap an extracted subscription and
+await packets asynchronously:
 
 ```rust
 use mcrx_core::TokioSubscription;
 
 let subscription = ctx.take_subscription(id).unwrap();
-let subscription = TokioSubscription::new(subscription)?;
-let packet = subscription.recv_with_metadata().await?;
+let subscription = TokioSubscription::new(subscription) ?;
+let packet = subscription.recv().await?;
 ```
 
----
-
-## 📚 Documentation
-
-- [Architecture](docs/architecture.md)
-- [Usage Guide](docs/usage.md)
-- [Demo Binaries](docs/demo.md)
-- [Metrics](docs/metrics.md)
-- [Design Decisions](docs/design-decisions.md)
-
----
-
-## 🧪 Demo Binaries
-
-Receiver:
-
-```bash
-cargo run --bin mcrx_recv -- 239.1.2.3 5000
-```
-
-Metadata-aware receiver:
-
-```bash
-cargo run --bin mcrx_recv_meta -- 239.1.2.3 5000
-```
-
-Tokio receiver:
+Run the Tokio example with:
 
 ```bash
 cargo run --features tokio --bin mcrx_tokio_recv -- 239.1.2.3 5000
+```
+
+## Optional Receive Metadata
+
+If you need more delivery context than source, group, port, and payload, use
+the metadata-aware receive APIs:
+
+```rust
+let subscription = ctx.get_subscription(id).unwrap();
+if let Some(packet) = subscription.try_recv_with_metadata() ? {
+println ! ("socket addr: {:?}", packet.metadata.socket_local_addr);
+println ! ("destination ip: {:?}", packet.metadata.destination_local_ip);
+}
+```
+
+## Demo Binaries
+
+Basic receiver:
+
+```bash
+cargo run --bin mcrx_recv -- 239.1.2.3 5000
 ```
 
 Sender:
@@ -133,33 +140,37 @@ Sender:
 cargo run --bin mcrx_send -- 239.1.2.3 5000 hello
 ```
 
-See [docs/demo.md](docs/demo.md) for full CLI and metrics documentation.
+Tokio receiver:
 
----
+```bash
+cargo run --features tokio --bin mcrx_tokio_recv -- 239.1.2.3 5000
+```
 
-## 🧪 Platform Support
+Metadata inspection receiver:
 
-| OS      | ASM | SSM | Notes    |
-|---------|-----|-----|----------|
-| macOS   | ✅   | ✅   | Verified |
-| Linux   | ✅   | ✅   | Verified |
+```bash
+cargo run --bin mcrx_recv_meta -- 239.1.2.3 5000
+```
+
+## Documentation
+
+- [Usage Guide](docs/usage.md)
+- [Architecture](docs/architecture.md)
+- [Demo Binaries](docs/demo.md)
+- [Metrics](docs/metrics.md)
+- [Design Decisions](docs/design-decisions.md)
+
+## Platform Support
+
+| OS      | ASM | SSM | Notes                                    |
+|---------|-----|-----|------------------------------------------|
+| macOS   | ✅   | ✅   | Verified                                 |
+| Linux   | ✅   | ✅   | Verified                                 |
 | Windows | ✅   | ✅   | Build-checked (`x86_64-pc-windows-msvc`) |
 
----
+## Compatibility
 
-## 🔁 ASM Cross-Platform Compatibility
-
-| Sender / Receiver | macOS | Windows | Linux | Android | iOS |
-|-------------------|-------|---------|-------|---------|-----|
-| macOS             | ✅     | ✅       | ✅     | ⏳       | ⏳   |
-| Windows           | ✅     | ✅       | ✅     | ⏳       | ⏳   |
-| Linux             | ✅     | ✅       | ✅     | ⏳       | ⏳   |
-| Android           | ⏳     | ⏳       | ⏳     | ⏳       | ⏳   |
-| iOS               | ⏳     | ⏳       | ⏳     | ⏳       | ⏳   |
-
----
-
-## 🔁 SSM Cross-Platform Compatibility
+ASM cross-platform compatibility:
 
 | Sender / Receiver | macOS | Windows | Linux | Android | iOS |
 |-------------------|-------|---------|-------|---------|-----|
@@ -169,16 +180,21 @@ See [docs/demo.md](docs/demo.md) for full CLI and metrics documentation.
 | Android           | ⏳     | ⏳       | ⏳     | ⏳       | ⏳   |
 | iOS               | ⏳     | ⏳       | ⏳     | ⏳       | ⏳   |
 
----
+SSM cross-platform compatibility:
 
-## ⚠️ Notes on macOS (SSM)
+| Sender / Receiver | macOS | Windows | Linux | Android | iOS |
+|-------------------|-------|---------|-------|---------|-----|
+| macOS             | ✅     | ✅       | ✅     | ⏳       | ⏳   |
+| Windows           | ✅     | ✅       | ✅     | ⏳       | ⏳   |
+| Linux             | ✅     | ✅       | ✅     | ⏳       | ⏳   |
+| Android           | ⏳     | ⏳       | ⏳     | ⏳       | ⏳   |
+| iOS               | ⏳     | ⏳       | ⏳     | ⏳       | ⏳   |
 
-- macOS supports IGMPv3 but may temporarily emit IGMPv2 reports
-- This can break SSM behavior on the network
-- A system reboot may restore correct behavior
+## Notes
 
----
+- macOS may temporarily emit IGMPv2 reports in some SSM setups
+- that can break SSM behavior on the network until the host state recovers
 
-## 📄 License
+## License
 
 BSD 2-Clause

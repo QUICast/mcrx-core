@@ -1,20 +1,19 @@
 # Usage
 
-## Creating a Context
+## Core Flow
 
 ```rust
 let mut ctx = Context::new();
-```
-
-## Creating Subscription Configurations
-
-### ASM
-
-```rust
 let config = SubscriptionConfig::asm(group, port);
+let id = ctx.add_subscription(config)?;
+ctx.join_subscription(id)?;
+
+if let Some(packet) = ctx.try_recv_any()? {
+    println!("received {} bytes", packet.payload.len());
+}
 ```
 
-### SSM
+For SSM:
 
 ```rust
 let config = SubscriptionConfig::ssm(group, source, port);
@@ -27,14 +26,7 @@ let mut config = SubscriptionConfig::asm(group, port);
 config.interface = Some(interface);
 ```
 
-## Adding and Joining a Subscription
-
-```rust
-let id = ctx.add_subscription(config)?;
-ctx.join_subscription(id)?;
-```
-
-## Adding a Subscription with an Existing Socket
+## Existing Sockets
 
 When an integration needs to create or bind the socket itself, pass it into the
 context directly. The socket must already be bound to `config.dst_port`.
@@ -53,15 +45,34 @@ let id = ctx.add_subscription_with_socket(config, socket)?;
 ctx.join_subscription(id)?;
 ```
 
-The supplied socket is switched to non-blocking mode, but multicast join/leave
-still flows through `join_subscription()` and `leave_subscription()` in this
-first integration step.
+The supplied socket is switched to non-blocking mode, while multicast
+join/leave still flows through `join_subscription()` and `leave_subscription()`.
+
+## Receiving
+
+From any joined subscription:
+
+```rust
+if let Some(packet) = ctx.try_recv_any()? {
+    println!("received {} bytes", packet.payload.len());
+}
+```
+
+From one specific subscription:
+
+```rust
+let subscription = ctx.get_subscription(id).unwrap();
+if let Some(packet) = subscription.try_recv()? {
+    println!("received {} bytes", packet.payload.len());
+}
+```
+
+`try_recv_any()` uses round-robin style fairness across joined subscriptions so
+repeated calls do not always favor the first subscription.
 
 ## Event Loop Integration
 
-There are now two intended integration styles for external event loops.
-
-Borrowing a live socket while the subscription stays inside the `Context`:
+Borrow a live socket while the subscription stays inside the `Context`:
 
 ```rust
 let subscription = ctx.get_subscription(id).unwrap();
@@ -74,7 +85,7 @@ let raw = subscription.as_raw_fd();
 let raw = subscription.as_raw_socket();
 ```
 
-If a registry API requires mutable socket access during registration, use:
+If a registry API needs mutable socket access during registration:
 
 ```rust
 for subscription in ctx.subscriptions_mut() {
@@ -84,7 +95,7 @@ for subscription in ctx.subscriptions_mut() {
 }
 ```
 
-Taking ownership back out of the `Context` for handoff into another runtime:
+Extract ownership for handoff into another runtime:
 
 ```rust
 let subscription = ctx.take_subscription(id).unwrap();
@@ -97,8 +108,8 @@ let socket = parts.socket;
 ```
 
 `take_subscription()` does not implicitly leave the multicast group. It
-preserves the current socket ownership and lifecycle state so the caller can
-continue receiving immediately in another loop if desired.
+preserves the current lifecycle state so the caller can continue receiving
+immediately in another loop if desired.
 
 ## Tokio Integration
 
@@ -109,7 +120,7 @@ owned subscription:
 cargo run --features tokio --bin mcrx_tokio_recv -- 239.1.2.3 5000
 ```
 
-The library also exposes a thin adapter type:
+The library also exposes `TokioSubscription`:
 
 ```rust
 use mcrx_core::TokioSubscription;
@@ -125,55 +136,16 @@ On Unix this waits for socket readiness via Tokio's `AsyncFd`. On other
 platforms it currently falls back to an async sleep-and-poll loop around the
 same non-blocking receive APIs.
 
-## Leaving and Removing a Subscription
+## Optional Receive Metadata
 
-```rust
-ctx.leave_subscription(id)?;
-ctx.remove_subscription(id);
-```
-
-If you need the owned subscription back instead of dropping it, use:
-
-```rust
-if let Some(subscription) = ctx.take_subscription(id) {
-    let socket = subscription.into_socket();
-    drop(socket);
-}
-```
-
-## Receiving from Any Subscription
-
-```rust
-if let Some(packet) = ctx.try_recv_any()? {
-    println!("received {} bytes", packet.payload.len());
-}
-```
-
-### Fairness
-
-`try_recv_any()` uses round-robin style fairness across joined subscriptions so repeated calls do not always favor the first subscription.
-
-## Receiving from a Specific Subscription
-
-```rust
-let subscription = ctx.get_subscription(id).unwrap();
-if let Some(packet) = subscription.try_recv()? {
-    println!("received {} bytes", packet.payload.len());
-}
-```
-
-## Receiving with Richer Metadata
-
-When you need more than source/group/port, use the metadata-aware receive APIs:
+When you need more delivery context than source, group, port, and payload, use
+the metadata-aware receive APIs:
 
 ```rust
 let subscription = ctx.get_subscription(id).unwrap();
 if let Some(packet) = subscription.try_recv_with_metadata()? {
-    println!("received {} bytes", packet.packet.payload.len());
     println!("socket addr: {:?}", packet.metadata.socket_local_addr);
-    println!("configured interface: {:?}", packet.metadata.configured_interface);
     println!("destination ip: {:?}", packet.metadata.destination_local_ip);
-    println!("ingress ifindex: {:?}", packet.metadata.ingress_interface_index);
 }
 ```
 
@@ -185,7 +157,7 @@ if let Some(packet) = ctx.try_recv_any_with_metadata()? {
 }
 ```
 
-Today the richer metadata surface exposes:
+Today the optional metadata surface exposes:
 
 - the socket's current local bind address
 - the configured join interface from `SubscriptionConfig`
@@ -195,7 +167,7 @@ Today the richer metadata surface exposes:
 On platforms where those ancillary control messages are not wired yet, the
 pktinfo-derived fields remain `None`.
 
-You can also inspect the local bind address for a subscription:
+You can also inspect the local bind address directly:
 
 ```rust
 let local_addr = subscription.local_addr()?;
@@ -204,29 +176,43 @@ println!("bound to {local_addr}");
 
 ## Batch Receiving
 
-### Bounded batch
+Bounded batch:
 
 ```rust
 let mut packets = Vec::new();
 ctx.try_recv_batch_into(&mut packets, 64)?;
 ```
 
-### Drain everything currently available
+Drain everything currently available:
 
 ```rust
 let mut packets = Vec::new();
 ctx.try_recv_all_into(&mut packets)?;
 ```
 
-### Semantics
-
 All receive APIs are non-blocking:
 
-- `Some(packet)` → packet was available
-- `None` → no packet is currently available
-- `Err(...)` → actual error
+- `Some(packet)` means a packet was available
+- `None` means no packet is currently available
+- `Err(...)` means an actual receive failure occurred
 
-## Multi-subscription Example
+## Leaving, Removing, and Taking Ownership
+
+```rust
+ctx.leave_subscription(id)?;
+ctx.remove_subscription(id);
+```
+
+If you need the owned subscription back instead of dropping it:
+
+```rust
+if let Some(subscription) = ctx.take_subscription(id) {
+    let socket = subscription.into_socket();
+    drop(socket);
+}
+```
+
+## Multiple Subscriptions
 
 ```rust
 let mut ctx = Context::new();

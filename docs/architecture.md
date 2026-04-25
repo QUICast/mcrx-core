@@ -12,35 +12,36 @@ graph TD
     Socket2 --> Packet2[Packet]
 ```
 
-## Core Concepts
+## Core Types
 
 ### Context
 
-The `Context` manages multiple multicast subscriptions.
+`Context` manages a set of subscriptions.
 
 Responsibilities:
 
 - owns subscriptions
-- provides fair receive across them
-- aggregates context-level metrics
-- manages lifecycle (`add`, `join`, `leave`, `remove`)
+- coordinates join and leave operations
+- provides fair receive across subscriptions
+- offers batch receive helpers
+- aggregates context-level metrics when enabled
 
 ### Subscription
 
-A `Subscription` represents one multicast receive path.
+`Subscription` models one multicast receive path.
 
 Responsibilities:
 
 - owns or adopts a socket
-- exposes borrowed or owned socket handoff paths for event-loop integration
 - stores subscription configuration
 - tracks lifecycle state
 - performs non-blocking receive
-- exposes per-subscription metrics snapshots
+- exposes borrowing or ownership handoff paths for event-loop integration
+- exposes per-subscription metrics snapshots when enabled
 
 ### Packet
 
-A `Packet` represents one received UDP datagram plus metadata:
+`Packet` represents one received UDP datagram:
 
 - subscription ID
 - source address
@@ -48,11 +49,8 @@ A `Packet` represents one received UDP datagram plus metadata:
 - destination port
 - payload
 
-For integrations that need richer receive context, `PacketWithMetadata` wraps a
-`Packet` together with a `ReceiveMetadata` struct. The current metadata surface
-captures socket-level context plus pktinfo-style destination/interface details
-on supported Unix and Windows IPv4 platforms, while still leaving room for
-future expansion.
+For integrations that need more delivery context, `PacketWithMetadata` wraps a
+`Packet` together with optional receive metadata from the platform layer.
 
 ## Data Flow
 
@@ -63,26 +61,19 @@ graph LR
 
 ## Why Context Exists
 
-The `Context` is not just a container.
+`Context` is more than a container. It centralizes:
 
-It provides:
-
-- coordination across subscriptions
+- subscription lifecycle management
 - fair round-robin receive
-- batch receive helpers
-- aggregated metrics
-- a single integration point for higher-level systems
+- batch draining helpers
+- aggregation across subscriptions
 
-Without it, each caller would need to implement:
+Without it, each integration would need to rebuild those pieces around raw
+sockets.
 
-- polling loops
-- fairness logic
-- aggregation
-- lifecycle management
+## Module Roles
 
-## Architectural Model
-
-- `Subscription` → data plane for one multicast flow
-- `Context` → control plane for a group of subscriptions
-- `platform` → socket lifecycle boundary for create/prepare/join/leave/recv operations
-- `tokio_adapter` → optional async wrapper layer over an extracted `Subscription`
+- `subscription` → one multicast receive path
+- `context` → orchestration across subscriptions
+- `platform` → socket lifecycle and receive boundary
+- `tokio_adapter` → optional async wrapper over an extracted subscription

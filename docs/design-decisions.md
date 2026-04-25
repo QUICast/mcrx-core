@@ -1,20 +1,27 @@
 # Design Decisions
 
+## Small Core, Optional Extensions
+
+The crate is centered on one job: receiving multicast traffic through a small,
+explicit core API.
+
+Features like Tokio integration, richer receive metadata, and metrics are kept
+as optional layers around that core rather than redefining it.
+
 ## Context vs Subscription
 
 A single `Subscription` models one multicast receive path.
 
-A `Context` exists to coordinate multiple subscriptions and provide behavior that does not belong to a single
-subscription, including:
+A `Context` coordinates multiple subscriptions and provides behavior that does
+not belong to a single one, including:
 
 - fairness across subscriptions
 - batch receive
+- lifecycle orchestration
 - aggregation of metrics
-- centralized lifecycle management
-- a stable top-level handle for integrations
+- a stable top-level integration handle
 
-This means callers can still think in terms of individual subscriptions, while higher-level integrations can work with
-one context object.
+This lets callers work at either level without duplicating logic.
 
 ## Non-blocking API
 
@@ -29,59 +36,49 @@ The library uses a pull-based, non-blocking API:
 
 Reasons:
 
-- no runtime dependency
-- works in sync and async environments
-- easy integration into custom event loops
-- suitable for desktop, server, and mobile use
+- no runtime dependency in the core crate
+- fits sync and async environments
+- integrates cleanly with custom event loops
+- keeps control over pacing and allocation with the caller
 
-## Explicit Join / Leave Lifecycle
+## Explicit Join and Leave Lifecycle
 
 Adding a subscription does not automatically join the multicast group.
 
-This separation makes the lifecycle explicit:
+This makes the lifecycle explicit:
 
-1. create and bind socket, or provide an existing bound socket
-2. add subscription
-3. join group when ready
-4. leave group without destroying the socket
-5. remove subscription when done
+1. create or provide a bound socket
+2. add the subscription
+3. join when ready
+4. leave without destroying the socket
+5. remove or extract the subscription when done
 
-This is cleaner for testing, metrics, and future lifecycle-sensitive platforms.
+That model is easier to reason about for tests, metrics, and runtime
+integration.
 
 ## Socket Ownership Boundary
 
-`Context::add_subscription()` remains the convenience path that creates and binds
+`Context::add_subscription()` is the convenience path that creates and binds
 the socket internally.
 
-`Context::add_subscription_with_socket()` is the lower-level integration path for
-embedders that need to control socket creation themselves. The current step keeps
-join/leave/receive behavior inside `mcrx-core`, while routing raw socket
-operations through the `platform` module so future IPv6, richer receive metadata,
-and alternate backends can plug in with less churn.
+`Context::add_subscription_with_socket()` is the lower-level integration path
+for embedders that need to control socket creation themselves.
 
-For event-loop integration, the library now supports two ownership modes:
+For event-loop integration, the library supports two ownership modes:
 
-- borrow the socket from a live `Subscription` via `socket()`, `socket_mut()`,
-  `as_raw_fd()`, or `as_raw_socket()`
-- extract the whole `Subscription` from a `Context` via `take_subscription()`
-  and move its owned socket into another loop or runtime
+- borrow the socket from a live `Subscription`
+- extract the whole `Subscription` from a `Context` with `take_subscription()`
 
-This keeps the default API simple while making ownership transfer explicit
-instead of forcing callers to rebuild subscription state around a raw socket.
+This keeps ownership transfer explicit instead of forcing callers to rebuild
+subscription state around a raw socket handle.
 
-An optional Tokio layer now builds on top of that ownership model instead of
-changing the core API. `TokioSubscription` wraps an owned `Subscription` after
-`take_subscription()`, so the async path reuses the same join/leave/receive
-logic rather than introducing a second socket management model.
+## Optional Receive Metadata
 
-## Staged Receive Metadata
-
-The original `Packet` type stays small and stable for callers that only need the
-core addressing tuple plus payload.
+The original `Packet` type stays small and stable for callers that only need
+the core addressing tuple plus payload.
 
 The richer path uses `PacketWithMetadata`, which wraps a `Packet` plus a
-non-exhaustive `ReceiveMetadata` struct. The first step intentionally exposes
-metadata in layers:
+non-exhaustive `ReceiveMetadata` struct. That metadata currently includes:
 
 - socket local address
 - configured join interface
@@ -89,29 +86,29 @@ metadata in layers:
 - pktinfo-style ingress interface index on supported Unix and Windows IPv4 platforms
 
 Where the platform layer does not provide those ancillary messages yet, the
-pktinfo-derived fields remain `None`. This lets integrators adopt the richer
-type now without forcing a breaking redesign each time a new OS-specific
-metadata source gets wired in.
+pktinfo-derived fields remain `None`.
+
+## Optional Tokio Layer
+
+The Tokio adapter builds on the ownership model above instead of changing the
+core receive API.
+
+`TokioSubscription` wraps an owned `Subscription` after `take_subscription()`,
+so the async path reuses the same join, leave, and receive logic rather than
+introducing a separate socket management model.
 
 ## Metrics Model
 
-The metrics model is intentionally split into:
+Metrics are split into:
 
 - cumulative snapshots
 - deltas between snapshots
 - sampler helpers for repeated sampling
 
-This avoids hidden mutable state inside snapshots while still making interval-based analysis easy.
+This avoids hidden mutable state inside snapshots while still making
+interval-based analysis straightforward.
 
-### Feature-gated Metrics
-
-Metrics are behind the `metrics` Cargo feature so that:
-
-- default builds have zero metrics overhead
-- core receive paths stay lean
-- users opt in only when needed
-
-### Why First Sampler Call Returns `None`
+### Why the First Sampler Call Returns `None`
 
 A delta needs a previous sample.
 

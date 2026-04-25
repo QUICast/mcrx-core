@@ -1,8 +1,8 @@
 # Metrics
 
-## Enabling Metrics
+Metrics are optional and sit outside the core receive API.
 
-Metrics are optional and enabled with:
+## Enabling Metrics
 
 ```bash
 cargo run --features metrics --bin mcrx_recv -- 239.1.2.3 5000
@@ -20,7 +20,7 @@ Examples:
 
 - total packets received
 - total bytes received
-- total joins/leaves
+- total joins and leaves
 
 ### Delta
 
@@ -34,13 +34,15 @@ Examples:
 
 ### Sampler
 
-A sampler stores the previous snapshot and computes deltas across repeated samples.
+A sampler stores the previous snapshot and computes deltas across repeated
+samples.
 
 ## Why the First Sampler Call Returns `None`
 
 A delta requires two snapshots.
 
-The first call stores the baseline snapshot and returns `None` so that later samples can be compared against it.
+The first call stores the baseline snapshot and returns `None` so that later
+samples can be compared against it.
 
 This avoids:
 
@@ -50,24 +52,18 @@ This avoids:
 
 ## Counter vs Gauge Semantics
 
-### Counters
-
 Counters are suitable for deltas and rates:
 
 - packets received
 - bytes received
 - receive errors
-- joins/leaves
+- joins and leaves
 - batch calls
-
-### Gauges
 
 Gauges reflect current state and are not converted into deltas:
 
 - active subscriptions
 - joined subscriptions
-
-These should be read directly from the latest snapshot.
 
 ## Rate Helpers
 
