@@ -17,6 +17,7 @@ Designed to be:
 - IPv4 SSM (`(S, G)`) support
 - Non-blocking receive API
 - Multiple concurrent subscriptions
+- Caller-provided socket support via `add_subscription_with_socket()`
 - Zero-copy-friendly payload handling via `bytes::Bytes`
 - Cross-platform design
 - Explicit subscription lifecycle (`add`, `join`, `leave`, `remove`)
@@ -43,6 +44,25 @@ ctx.join_subscription(id)?;
 if let Some(packet) = ctx.try_recv_any()? {
     println!("Received {} bytes", packet.payload.len());
 }
+```
+
+Using an existing bound socket is also supported when you need tighter control over
+socket creation or runtime integration:
+
+```rust
+use mcrx_core::{Context, SubscriptionConfig};
+use socket2::{Domain, Protocol, SockAddr, Socket, Type};
+use std::net::{Ipv4Addr, SocketAddrV4};
+
+let mut ctx = Context::new();
+let config = SubscriptionConfig::asm(Ipv4Addr::new(239, 1, 2, 3), 5000);
+
+let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+socket.set_reuse_address(true)?;
+socket.bind(&SockAddr::from(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 5000)))?;
+
+let id = ctx.add_subscription_with_socket(config, socket)?;
+ctx.join_subscription(id)?;
 ```
 
 ---

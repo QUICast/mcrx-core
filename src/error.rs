@@ -44,6 +44,18 @@ pub enum McrxError {
     #[error("MCRX: failed to bind UDP socket: {0}")]
     SocketBindFailed(io::Error),
 
+    /// Reading the local address of an existing socket failed.
+    #[error("MCRX: failed to read local address from existing socket: {0}")]
+    SocketLocalAddrFailed(io::Error),
+
+    /// The provided existing socket does not match the current IPv4-only receive model.
+    #[error("MCRX: existing socket must be an IPv4 UDP socket")]
+    ExistingSocketMustBeIpv4,
+
+    /// The provided existing socket is bound to a different UDP port than the subscription.
+    #[error("MCRX: existing socket is bound to UDP port {actual}, expected {expected}")]
+    ExistingSocketPortMismatch { expected: u16, actual: u16 },
+
     /// Joining an IPv4 multicast group failed.
     #[error("MCRX: failed to join IPv4 multicast group: {0}")]
     MulticastJoinFailed(io::Error),

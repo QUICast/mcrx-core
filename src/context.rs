@@ -1,8 +1,11 @@
 use crate::config::SubscriptionConfig;
 use crate::error::McrxError;
 use crate::packet::Packet;
-use crate::platform::{join_multicast_group, leave_multicast_group, open_bound_socket};
+use crate::platform::{
+    join_multicast_group, leave_multicast_group, open_bound_socket, prepare_existing_socket,
+};
 use crate::subscription::{Subscription, SubscriptionId};
+use socket2::Socket;
 
 #[cfg(feature = "metrics")]
 use crate::metrics::ContextMetricsSnapshot;
@@ -33,6 +36,40 @@ pub struct Context {
 }
 
 impl Context {
+    fn ensure_subscription_config_is_unique(
+        &self,
+        config: &SubscriptionConfig,
+    ) -> Result<(), McrxError> {
+        if self
+            .subscriptions
+            .iter()
+            .any(|subscription| subscription.config() == config)
+        {
+            return Err(McrxError::DuplicateSubscription);
+        }
+
+        Ok(())
+    }
+
+    fn insert_subscription(
+        &mut self,
+        config: SubscriptionConfig,
+        socket: Socket,
+    ) -> SubscriptionId {
+        let id = SubscriptionId(self.next_subscription_id);
+        self.next_subscription_id += 1;
+
+        let subscription = Subscription::new(id, config, socket);
+        self.subscriptions.push(subscription);
+
+        #[cfg(feature = "metrics")]
+        self.metrics
+            .subscriptions_added
+            .set(self.metrics.subscriptions_added.get() + 1);
+
+        id
+    }
+
     /// Creates an empty context with no subscriptions.
     pub fn new() -> Self {
         Self {
@@ -120,29 +157,32 @@ impl Context {
         config: SubscriptionConfig,
     ) -> Result<SubscriptionId, McrxError> {
         config.validate()?;
-
-        if self
-            .subscriptions
-            .iter()
-            .any(|subscription| subscription.config() == &config)
-        {
-            return Err(McrxError::DuplicateSubscription);
-        }
+        self.ensure_subscription_config_is_unique(&config)?;
 
         let socket = open_bound_socket(&config)?;
+        Ok(self.insert_subscription(config, socket))
+    }
 
-        let id = SubscriptionId(self.next_subscription_id);
-        self.next_subscription_id += 1;
+    /// Adds a new subscription using a caller-provided socket.
+    ///
+    /// The socket must already be bound to the destination port from `config`.
+    /// This method preserves the existing lifecycle model: the context will still
+    /// perform multicast join/leave operations later via `join_subscription()` and
+    /// `leave_subscription()`.
+    ///
+    /// The supplied socket is switched to non-blocking mode so the receive APIs keep
+    /// their usual non-blocking behavior.
+    pub fn add_subscription_with_socket(
+        &mut self,
+        config: SubscriptionConfig,
+        socket: Socket,
+    ) -> Result<SubscriptionId, McrxError> {
+        config.validate()?;
+        self.ensure_subscription_config_is_unique(&config)?;
 
-        let subscription = Subscription::new(id, config, socket);
-        self.subscriptions.push(subscription);
+        let socket = prepare_existing_socket(socket, &config)?;
 
-        #[cfg(feature = "metrics")]
-        self.metrics
-            .subscriptions_added
-            .set(self.metrics.subscriptions_added.get() + 1);
-
-        Ok(id)
+        Ok(self.insert_subscription(config, socket))
     }
 
     /// Removes the subscription with the given ID.
@@ -324,11 +364,24 @@ mod tests {
     use super::*;
     use crate::config::SourceFilter;
     use crate::subscription::SubscriptionState;
+    use socket2::{Domain, Protocol, SockAddr, Socket, Type};
     use std::net::{Ipv4Addr, SocketAddrV4};
     use std::thread;
     use std::time::{Duration, Instant};
 
     use crate::test_support::{make_multicast_sender, recv_next_packet, sample_config};
+
+    fn make_bound_external_socket(port: u16) -> Socket {
+        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
+        socket.set_reuse_address(true).unwrap();
+        socket
+            .bind(&SockAddr::from(SocketAddrV4::new(
+                Ipv4Addr::UNSPECIFIED,
+                port,
+            )))
+            .unwrap();
+        socket
+    }
 
     fn send_round_robin_test_packets(
         first_config: &SubscriptionConfig,
@@ -450,6 +503,35 @@ mod tests {
     }
 
     #[test]
+    fn add_subscription_with_socket_returns_id_and_increases_count() {
+        let mut context = Context::new();
+        let config = sample_config(7001);
+        let socket = make_bound_external_socket(config.dst_port);
+
+        let id = context
+            .add_subscription_with_socket(config, socket)
+            .unwrap();
+
+        assert_eq!(id, SubscriptionId(1));
+        assert_eq!(context.subscription_count(), 1);
+        assert_eq!(context.subscriptions()[0].id(), id);
+    }
+
+    #[test]
+    fn add_subscription_with_socket_rejects_port_mismatch() {
+        let mut context = Context::new();
+        let config = sample_config(7002);
+        let socket = make_bound_external_socket(0);
+
+        let result = context.add_subscription_with_socket(config, socket);
+
+        assert!(matches!(
+            result,
+            Err(McrxError::ExistingSocketPortMismatch { expected: 7002, .. })
+        ));
+    }
+
+    #[test]
     fn contains_subscription_returns_true_for_existing_id() {
         let mut context = Context::new();
         let id = context.add_subscription(sample_config(8000)).unwrap();
@@ -532,6 +614,32 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(1);
         let packet = recv_next_packet(&mut context, deadline);
 
+        assert_eq!(packet.group, std::net::IpAddr::V4(config.group));
+        assert_eq!(packet.dst_port, config.dst_port);
+        assert_eq!(&packet.payload[..], payload);
+    }
+
+    #[test]
+    fn try_recv_any_works_with_caller_provided_socket() {
+        let mut context = Context::new();
+        let config = sample_config(9031);
+        let socket = make_bound_external_socket(config.dst_port);
+        let id = context
+            .add_subscription_with_socket(config.clone(), socket)
+            .unwrap();
+        context.join_subscription(id).unwrap();
+
+        let sender = make_multicast_sender();
+
+        let payload = b"context add_subscription_with_socket";
+        sender
+            .send_to(payload, SocketAddrV4::new(config.group, config.dst_port))
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let packet = recv_next_packet(&mut context, deadline);
+
+        assert_eq!(packet.subscription_id, id);
         assert_eq!(packet.group, std::net::IpAddr::V4(config.group));
         assert_eq!(packet.dst_port, config.dst_port);
         assert_eq!(&packet.payload[..], payload);

@@ -31,7 +31,7 @@ A `Subscription` represents one multicast receive path.
 
 Responsibilities:
 
-- owns a socket
+- owns or adopts a socket
 - stores subscription configuration
 - tracks lifecycle state
 - performs non-blocking receive
@@ -77,3 +77,4 @@ Without it, each caller would need to implement:
 
 - `Subscription` → data plane for one multicast flow
 - `Context` → control plane for a group of subscriptions
+- `platform` → socket lifecycle boundary for create/prepare/join/leave/recv operations

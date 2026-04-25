@@ -34,6 +34,29 @@ let id = ctx.add_subscription(config)?;
 ctx.join_subscription(id)?;
 ```
 
+## Adding a Subscription with an Existing Socket
+
+When an integration needs to create or bind the socket itself, pass it into the
+context directly. The socket must already be bound to `config.dst_port`.
+
+```rust
+use socket2::{Domain, Protocol, SockAddr, Socket, Type};
+use std::net::{Ipv4Addr, SocketAddrV4};
+
+let config = SubscriptionConfig::asm(Ipv4Addr::new(239, 1, 2, 3), 5000);
+
+let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+socket.set_reuse_address(true)?;
+socket.bind(&SockAddr::from(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 5000)))?;
+
+let id = ctx.add_subscription_with_socket(config, socket)?;
+ctx.join_subscription(id)?;
+```
+
+The supplied socket is switched to non-blocking mode, but multicast join/leave
+still flows through `join_subscription()` and `leave_subscription()` in this
+first integration step.
+
 ## Leaving and Removing a Subscription
 
 ```rust
@@ -60,6 +83,13 @@ let subscription = ctx.get_subscription(id).unwrap();
 if let Some(packet) = subscription.try_recv()? {
     println!("received {} bytes", packet.payload.len());
 }
+```
+
+You can also inspect the local bind address for a subscription:
+
+```rust
+let local_addr = subscription.local_addr()?;
+println!("bound to {local_addr}");
 ```
 
 ## Batch Receiving

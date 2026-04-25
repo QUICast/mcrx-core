@@ -3,12 +3,10 @@ use crate::error::McrxError;
 #[cfg(feature = "metrics")]
 use crate::metrics::SubscriptionMetricsSnapshot;
 use crate::packet::Packet;
-use bytes::Bytes;
+use crate::platform::{recv_packet, socket_local_addr};
 use socket2::Socket;
 #[cfg(feature = "metrics")]
 use std::cell::{Cell, RefCell};
-use std::io::ErrorKind;
-#[cfg(feature = "metrics")]
 use std::net::SocketAddr;
 #[cfg(feature = "metrics")]
 use std::time::SystemTime;
@@ -55,7 +53,11 @@ pub struct Subscription {
 }
 
 impl Subscription {
-    /// Creates a new subscription from an ID and configuration.
+    /// Creates a new subscription from an ID, configuration, and socket.
+    ///
+    /// This is a low-level constructor. Callers are responsible for providing a
+    /// socket that is compatible with the subscription configuration. For the
+    /// checked convenience path, prefer `Context::add_subscription_with_socket()`.
     pub fn new(id: SubscriptionId, config: SubscriptionConfig, socket: Socket) -> Self {
         Self {
             id,
@@ -88,28 +90,12 @@ impl Subscription {
     /// - `Ok(Some(packet))` if a packet was received,
     /// - `Ok(None)` if no packet is currently available,
     /// - `Err(...)` on an actual receive failure.
-    ///
-    /// Uses a `MaybeUninit<u8>` buffer because `socket2::Socket::recv_from` may
-    /// write into uninitialized memory.
-    ///
-    /// After `recv_from` returns `len`, only the first `len` bytes are assumed to
-    /// be initialized by the OS. Those bytes are then reinterpreted as `&[u8]`
-    /// for copying into the packet payload.
     pub fn try_recv(&self) -> Result<Option<Packet>, McrxError> {
         if !self.is_joined() {
             return Err(McrxError::SubscriptionNotJoined);
         }
-        let mut buf = [std::mem::MaybeUninit::<u8>::uninit(); 65535];
-
-        match self.socket.recv_from(&mut buf) {
-            Ok((len, addr)) => {
-                let source = addr.as_socket().ok_or(McrxError::NonIpSocketAddress)?;
-
-                // SAFETY: `recv_from` initialized exactly the first `len` bytes of `buf`.
-                // We only create a slice over that initialized prefix, and copy it immediately.
-                let payload_bytes =
-                    unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, len) };
-
+        match recv_packet(&self.socket, self.id, &self.config) {
+            Ok(Some(packet)) => {
                 #[cfg(feature = "metrics")]
                 {
                     self.metrics
@@ -117,24 +103,17 @@ impl Subscription {
                         .set(self.metrics.packets_received.get() + 1);
                     self.metrics
                         .bytes_received
-                        .set(self.metrics.bytes_received.get() + len as u64);
-                    self.metrics.last_payload_len.set(Some(len));
-                    *self.metrics.last_source.borrow_mut() = Some(source);
+                        .set(self.metrics.bytes_received.get() + packet.payload.len() as u64);
+                    self.metrics
+                        .last_payload_len
+                        .set(Some(packet.payload.len()));
+                    *self.metrics.last_source.borrow_mut() = Some(packet.source);
                     *self.metrics.last_receive_at.borrow_mut() = Some(SystemTime::now());
                 }
 
-                let packet = Packet {
-                    subscription_id: self.id,
-                    source,
-                    group: std::net::IpAddr::V4(self.config.group),
-                    dst_port: self.config.dst_port,
-                    payload: Bytes::copy_from_slice(payload_bytes),
-                };
-
                 Ok(Some(packet))
             }
-
-            Err(err) if err.kind() == ErrorKind::WouldBlock => {
+            Ok(None) => {
                 #[cfg(feature = "metrics")]
                 self.metrics
                     .would_block_count
@@ -142,14 +121,13 @@ impl Subscription {
 
                 Ok(None)
             }
-
             Err(err) => {
                 #[cfg(feature = "metrics")]
                 self.metrics
                     .receive_errors
                     .set(self.metrics.receive_errors.get() + 1);
 
-                Err(McrxError::ReceiveFailed(err))
+                Err(err)
             }
         }
     }
@@ -161,6 +139,11 @@ impl Subscription {
     pub fn as_raw_fd(&self) -> std::os::fd::RawFd {
         use std::os::fd::AsRawFd;
         self.socket.as_raw_fd()
+    }
+
+    /// Returns the local socket address currently bound by this subscription.
+    pub fn local_addr(&self) -> Result<SocketAddr, McrxError> {
+        socket_local_addr(&self.socket)
     }
 
     /// Returns the current lifecycle state of the subscription.
@@ -427,5 +410,19 @@ mod tests {
         let result = subscription.mark_bound();
 
         assert!(matches!(result, Err(McrxError::SubscriptionNotJoined)));
+    }
+
+    #[test]
+    fn local_addr_returns_bound_socket_address() {
+        let config = sample_config(55028);
+        let socket = platform::open_bound_socket(&config).unwrap();
+        let subscription = Subscription::new(SubscriptionId(1), config.clone(), socket);
+
+        let local_addr = subscription.local_addr().unwrap();
+
+        assert_eq!(
+            local_addr,
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, config.dst_port))
+        );
     }
 }

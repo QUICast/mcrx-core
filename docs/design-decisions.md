@@ -38,13 +38,24 @@ Adding a subscription does not automatically join the multicast group.
 
 This separation makes the lifecycle explicit:
 
-1. create and bind socket
+1. create and bind socket, or provide an existing bound socket
 2. add subscription
 3. join group when ready
 4. leave group without destroying the socket
 5. remove subscription when done
 
 This is cleaner for testing, metrics, and future lifecycle-sensitive platforms.
+
+## Socket Ownership Boundary
+
+`Context::add_subscription()` remains the convenience path that creates and binds
+the socket internally.
+
+`Context::add_subscription_with_socket()` is the lower-level integration path for
+embedders that need to control socket creation themselves. The current step keeps
+join/leave/receive behavior inside `mcrx-core`, while routing raw socket
+operations through the `platform` module so future IPv6, richer receive metadata,
+and alternate backends can plug in with less churn.
 
 ## Metrics Model
 
@@ -73,4 +84,3 @@ Returning `None` on the first sampler call avoids:
 - fake zero-duration intervals
 - misleading rates
 - hidden baseline assumptions
-
