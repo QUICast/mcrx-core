@@ -23,6 +23,12 @@ fn resolve_interface(config: &SubscriptionConfig) -> Ipv4Addr {
     config.interface.unwrap_or(Ipv4Addr::UNSPECIFIED)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DetailedReceiveMode {
+    Basic,
+    Ancillary,
+}
+
 #[cfg(windows)]
 type WsaRecvMsgFn = unsafe extern "system" fn(
     SOCKET,
@@ -32,6 +38,74 @@ type WsaRecvMsgFn = unsafe extern "system" fn(
     LPWSAOVERLAPPED_COMPLETION_ROUTINE,
 ) -> i32;
 
+pub(crate) struct ReceiveSocket {
+    socket: Socket,
+    local_addr: Option<SocketAddr>,
+    detailed_receive_mode: DetailedReceiveMode,
+    #[cfg(windows)]
+    wsarecvmsg: Option<WsaRecvMsgFn>,
+}
+
+impl std::fmt::Debug for ReceiveSocket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReceiveSocket")
+            .field("local_addr", &self.local_addr)
+            .field("detailed_receive_mode", &self.detailed_receive_mode)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ReceiveSocket {
+    pub(crate) fn adopt(socket: Socket) -> Self {
+        let local_addr = try_socket_local_addr(&socket).ok();
+
+        #[cfg(windows)]
+        let (detailed_receive_mode, wsarecvmsg) = configure_detailed_receive(&socket);
+        #[cfg(not(windows))]
+        let detailed_receive_mode = configure_detailed_receive(&socket);
+
+        Self {
+            socket,
+            local_addr,
+            detailed_receive_mode,
+            #[cfg(windows)]
+            wsarecvmsg,
+        }
+    }
+
+    pub(crate) fn socket(&self) -> &Socket {
+        &self.socket
+    }
+
+    pub(crate) fn local_addr(&self) -> Result<SocketAddr, McrxError> {
+        self.local_addr
+            .or_else(|| try_socket_local_addr(&self.socket).ok())
+            .ok_or_else(|| {
+                McrxError::SocketLocalAddrFailed(std::io::Error::other(
+                    "failed to determine socket local address",
+                ))
+            })
+    }
+
+    fn base_metadata(&self, config: &SubscriptionConfig) -> Result<ReceiveMetadata, McrxError> {
+        Ok(ReceiveMetadata {
+            socket_local_addr: Some(self.local_addr()?),
+            configured_interface: config.interface.map(IpAddr::V4),
+            destination_local_ip: None,
+            ingress_interface_index: None,
+        })
+    }
+
+    fn uses_ancillary_metadata(&self) -> bool {
+        matches!(self.detailed_receive_mode, DetailedReceiveMode::Ancillary)
+    }
+
+    #[cfg(windows)]
+    fn wsarecvmsg(&self) -> Option<WsaRecvMsgFn> {
+        self.wsarecvmsg
+    }
+}
+
 #[cfg(windows)]
 fn raw_socket(socket: &Socket) -> SOCKET {
     socket.as_raw_socket() as SOCKET
@@ -40,6 +114,14 @@ fn raw_socket(socket: &Socket) -> SOCKET {
 #[cfg(windows)]
 fn last_wsa_error() -> std::io::Error {
     std::io::Error::from_raw_os_error(unsafe { WSAGetLastError() })
+}
+
+fn try_socket_local_addr(socket: &Socket) -> Result<SocketAddr, McrxError> {
+    socket
+        .local_addr()
+        .map_err(McrxError::SocketLocalAddrFailed)?
+        .as_socket()
+        .ok_or(McrxError::NonIpSocketAddress)
 }
 
 #[cfg(windows)]
@@ -145,6 +227,45 @@ fn enable_receive_metadata(socket: &Socket) -> Result<(), McrxError> {
     set_socket_option_flag(socket, IPPROTO_IP as i32, IP_PKTINFO)
 }
 
+#[cfg(all(unix, any(target_os = "linux", target_os = "android")))]
+fn configure_detailed_receive(socket: &Socket) -> DetailedReceiveMode {
+    if enable_receive_metadata(socket).is_ok() {
+        DetailedReceiveMode::Ancillary
+    } else {
+        DetailedReceiveMode::Basic
+    }
+}
+
+#[cfg(all(
+    unix,
+    any(
+        target_vendor = "apple",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    )
+))]
+fn configure_detailed_receive(socket: &Socket) -> DetailedReceiveMode {
+    if enable_receive_metadata(socket).is_ok() {
+        DetailedReceiveMode::Ancillary
+    } else {
+        DetailedReceiveMode::Basic
+    }
+}
+
+#[cfg(windows)]
+fn configure_detailed_receive(socket: &Socket) -> (DetailedReceiveMode, Option<WsaRecvMsgFn>) {
+    if enable_receive_metadata(socket).is_err() {
+        return (DetailedReceiveMode::Basic, None);
+    }
+
+    match get_wsarecvmsg(socket) {
+        Ok(recvmsg) => (DetailedReceiveMode::Ancillary, Some(recvmsg)),
+        Err(_) => (DetailedReceiveMode::Basic, None),
+    }
+}
+
 #[cfg(not(any(
     windows,
     all(unix, any(target_os = "linux", target_os = "android")),
@@ -159,8 +280,8 @@ fn enable_receive_metadata(socket: &Socket) -> Result<(), McrxError> {
         )
     )
 )))]
-fn enable_receive_metadata(_socket: &Socket) -> Result<(), McrxError> {
-    Ok(())
+fn configure_detailed_receive(_socket: &Socket) -> DetailedReceiveMode {
+    DetailedReceiveMode::Basic
 }
 
 #[cfg(unix)]
@@ -372,7 +493,7 @@ fn apply_receive_ancillary_data(msg: &WSAMSG, metadata: &mut ReceiveMetadata) {
 
 #[cfg(unix)]
 fn recv_packet_with_metadata_unix(
-    socket: &Socket,
+    socket: &ReceiveSocket,
     subscription_id: SubscriptionId,
     config: &SubscriptionConfig,
 ) -> Result<Option<PacketWithMetadata>, McrxError> {
@@ -397,7 +518,7 @@ fn recv_packet_with_metadata_unix(
                 msg.msg_controllen = control.len() as _;
             }
 
-            let received = libc::recvmsg(socket.as_raw_fd(), &mut msg, 0);
+            let received = libc::recvmsg(socket.socket().as_raw_fd(), &mut msg, 0);
             if received == -1 {
                 return Err(std::io::Error::last_os_error());
             }
@@ -419,12 +540,7 @@ fn recv_packet_with_metadata_unix(
     // We only create a slice over that initialized prefix, and copy it immediately.
     let payload_bytes = unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, len) };
 
-    let mut metadata = ReceiveMetadata {
-        socket_local_addr: Some(socket_local_addr(socket)?),
-        configured_interface: config.interface.map(IpAddr::V4),
-        destination_local_ip: None,
-        ingress_interface_index: None,
-    };
+    let mut metadata = socket.base_metadata(config)?;
 
     if control_len != 0 {
         let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
@@ -447,11 +563,14 @@ fn recv_packet_with_metadata_unix(
 
 #[cfg(windows)]
 fn recv_packet_with_metadata_windows(
-    socket: &Socket,
+    socket: &ReceiveSocket,
     subscription_id: SubscriptionId,
     config: &SubscriptionConfig,
 ) -> Result<Option<PacketWithMetadata>, McrxError> {
-    let recvmsg = get_wsarecvmsg(socket)?;
+    let recvmsg = match socket.wsarecvmsg() {
+        Some(recvmsg) => recvmsg,
+        None => return recv_packet_impl(socket, subscription_id, config, true),
+    };
     let mut buf = [std::mem::MaybeUninit::<u8>::uninit(); 65535];
     let mut data_buf = WSABUF {
         len: buf.len() as u32,
@@ -476,7 +595,7 @@ fn recv_packet_with_metadata_windows(
             }
 
             let result = recvmsg(
-                raw_socket(socket),
+                raw_socket(socket.socket()),
                 &mut msg,
                 &mut bytes_received,
                 std::ptr::null_mut(),
@@ -504,12 +623,7 @@ fn recv_packet_with_metadata_windows(
     let payload_bytes =
         unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, bytes_received as usize) };
 
-    let mut metadata = ReceiveMetadata {
-        socket_local_addr: Some(socket_local_addr(socket)?),
-        configured_interface: config.interface.map(IpAddr::V4),
-        destination_local_ip: None,
-        ingress_interface_index: None,
-    };
+    let mut metadata = socket.base_metadata(config)?;
 
     if !msg.Control.buf.is_null() && msg.Control.len != 0 {
         apply_receive_ancillary_data(&msg, &mut metadata);
@@ -527,11 +641,44 @@ fn recv_packet_with_metadata_windows(
     }))
 }
 
+#[cfg(unix)]
+fn recv_packet_with_ancillary_metadata(
+    socket: &ReceiveSocket,
+    subscription_id: SubscriptionId,
+    config: &SubscriptionConfig,
+) -> Result<Option<PacketWithMetadata>, McrxError> {
+    match recv_packet_with_metadata_unix(socket, subscription_id, config) {
+        Err(McrxError::ReceiveFailed(err)) if err.kind() == ErrorKind::WouldBlock => Ok(None),
+        other => other,
+    }
+}
+
+#[cfg(windows)]
+fn recv_packet_with_ancillary_metadata(
+    socket: &ReceiveSocket,
+    subscription_id: SubscriptionId,
+    config: &SubscriptionConfig,
+) -> Result<Option<PacketWithMetadata>, McrxError> {
+    match recv_packet_with_metadata_windows(socket, subscription_id, config) {
+        Err(McrxError::ReceiveFailed(err)) if err.kind() == ErrorKind::WouldBlock => Ok(None),
+        other => other,
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn recv_packet_with_ancillary_metadata(
+    socket: &ReceiveSocket,
+    subscription_id: SubscriptionId,
+    config: &SubscriptionConfig,
+) -> Result<Option<PacketWithMetadata>, McrxError> {
+    recv_packet_impl(socket, subscription_id, config, true)
+}
+
 /// Opens and binds a UDP socket for the given subscription configuration.
 ///
 /// The socket is bound to `0.0.0.0:dst_port` so it can receive multicast traffic
 /// destined for the configured UDP port. The socket is configured as non-blocking.
-pub(crate) fn open_bound_socket(config: &SubscriptionConfig) -> Result<Socket, McrxError> {
+pub(crate) fn open_bound_socket(config: &SubscriptionConfig) -> Result<ReceiveSocket, McrxError> {
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
         .map_err(McrxError::SocketCreateFailed)?;
 
@@ -556,7 +703,7 @@ pub(crate) fn open_bound_socket(config: &SubscriptionConfig) -> Result<Socket, M
 pub(crate) fn prepare_existing_socket(
     socket: Socket,
     config: &SubscriptionConfig,
-) -> Result<Socket, McrxError> {
+) -> Result<ReceiveSocket, McrxError> {
     let local_addr = socket_local_addr(&socket)?;
 
     match local_addr {
@@ -577,18 +724,14 @@ pub(crate) fn prepare_existing_socket(
         .set_nonblocking(true)
         .map_err(McrxError::SocketOptionFailed)?;
 
-    enable_receive_metadata(&socket)?;
-
-    Ok(socket)
+    let mut receive_socket = ReceiveSocket::adopt(socket);
+    receive_socket.local_addr = Some(local_addr);
+    Ok(receive_socket)
 }
 
 /// Returns the local IP socket address for the given socket.
 pub(crate) fn socket_local_addr(socket: &Socket) -> Result<SocketAddr, McrxError> {
-    socket
-        .local_addr()
-        .map_err(McrxError::SocketLocalAddrFailed)?
-        .as_socket()
-        .ok_or(McrxError::NonIpSocketAddress)
+    try_socket_local_addr(socket)
 }
 
 /// Joins the configured multicast group for this subscription on an already bound socket.
@@ -632,14 +775,14 @@ pub(crate) fn leave_multicast_group(
 }
 
 fn recv_packet_impl(
-    socket: &Socket,
+    socket: &ReceiveSocket,
     subscription_id: SubscriptionId,
     config: &SubscriptionConfig,
     include_metadata: bool,
 ) -> Result<Option<PacketWithMetadata>, McrxError> {
     let mut buf = [std::mem::MaybeUninit::<u8>::uninit(); 65535];
 
-    match socket.recv_from(&mut buf) {
+    match socket.socket().recv_from(&mut buf) {
         Ok((len, addr)) => {
             let source = addr.as_socket().ok_or(McrxError::NonIpSocketAddress)?;
 
@@ -649,12 +792,7 @@ fn recv_packet_impl(
                 unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, len) };
 
             let metadata = if include_metadata {
-                ReceiveMetadata {
-                    socket_local_addr: Some(socket_local_addr(socket)?),
-                    configured_interface: config.interface.map(IpAddr::V4),
-                    destination_local_ip: None,
-                    ingress_interface_index: None,
-                }
+                socket.base_metadata(config)?
             } else {
                 ReceiveMetadata::empty()
             };
@@ -677,7 +815,7 @@ fn recv_packet_impl(
 
 /// Attempts to receive a packet from the given socket without blocking.
 pub(crate) fn recv_packet(
-    socket: &Socket,
+    socket: &ReceiveSocket,
     subscription_id: SubscriptionId,
     config: &SubscriptionConfig,
 ) -> Result<Option<Packet>, McrxError> {
@@ -686,38 +824,15 @@ pub(crate) fn recv_packet(
 }
 
 /// Attempts to receive a packet and richer receive metadata without blocking.
-#[cfg(unix)]
 pub(crate) fn recv_packet_with_metadata(
-    socket: &Socket,
+    socket: &ReceiveSocket,
     subscription_id: SubscriptionId,
     config: &SubscriptionConfig,
 ) -> Result<Option<PacketWithMetadata>, McrxError> {
-    match recv_packet_with_metadata_unix(socket, subscription_id, config) {
-        Err(McrxError::ReceiveFailed(err)) if err.kind() == ErrorKind::WouldBlock => Ok(None),
-        other => other,
+    if socket.uses_ancillary_metadata() {
+        return recv_packet_with_ancillary_metadata(socket, subscription_id, config);
     }
-}
 
-/// Attempts to receive a packet and richer receive metadata without blocking.
-#[cfg(windows)]
-pub(crate) fn recv_packet_with_metadata(
-    socket: &Socket,
-    subscription_id: SubscriptionId,
-    config: &SubscriptionConfig,
-) -> Result<Option<PacketWithMetadata>, McrxError> {
-    match recv_packet_with_metadata_windows(socket, subscription_id, config) {
-        Err(McrxError::ReceiveFailed(err)) if err.kind() == ErrorKind::WouldBlock => Ok(None),
-        other => other,
-    }
-}
-
-/// Attempts to receive a packet and richer receive metadata without blocking.
-#[cfg(not(any(unix, windows)))]
-pub(crate) fn recv_packet_with_metadata(
-    socket: &Socket,
-    subscription_id: SubscriptionId,
-    config: &SubscriptionConfig,
-) -> Result<Option<PacketWithMetadata>, McrxError> {
     recv_packet_impl(socket, subscription_id, config, true)
 }
 
@@ -735,7 +850,7 @@ mod tests {
         assert!(socket.is_ok());
 
         let socket = socket.unwrap();
-        let result = join_multicast_group(&socket, &config);
+        let result = join_multicast_group(socket.socket(), &config);
         assert!(result.is_ok());
     }
 
@@ -751,7 +866,7 @@ mod tests {
         assert!(socket.is_ok());
 
         let socket = socket.unwrap();
-        let result = join_multicast_group(&socket, &config);
+        let result = join_multicast_group(socket.socket(), &config);
         assert!(result.is_ok());
     }
 

@@ -2,7 +2,8 @@ use crate::config::SubscriptionConfig;
 use crate::error::McrxError;
 use crate::packet::{Packet, PacketWithMetadata};
 use crate::platform::{
-    join_multicast_group, leave_multicast_group, open_bound_socket, prepare_existing_socket,
+    ReceiveSocket, join_multicast_group, leave_multicast_group, open_bound_socket,
+    prepare_existing_socket,
 };
 use crate::subscription::{Subscription, SubscriptionId};
 use socket2::Socket;
@@ -54,12 +55,12 @@ impl Context {
     fn insert_subscription(
         &mut self,
         config: SubscriptionConfig,
-        socket: Socket,
+        socket: ReceiveSocket,
     ) -> SubscriptionId {
         let id = SubscriptionId(self.next_subscription_id);
         self.next_subscription_id += 1;
 
-        let subscription = Subscription::new(id, config, socket);
+        let subscription = Subscription::from_receive_socket(id, config, socket);
         self.subscriptions.push(subscription);
 
         #[cfg(feature = "metrics")]
@@ -237,6 +238,33 @@ impl Context {
         Ok(())
     }
 
+    fn try_recv_from_joined<T>(
+        &mut self,
+        mut recv: impl FnMut(&Subscription) -> Result<Option<T>, McrxError>,
+    ) -> Result<Option<T>, McrxError> {
+        let subscription_count = self.subscriptions.len();
+
+        if subscription_count == 0 {
+            return Ok(None);
+        }
+
+        for offset in 0..subscription_count {
+            let index = (self.next_recv_index + offset) % subscription_count;
+            let subscription = &self.subscriptions[index];
+
+            if !subscription.is_joined() {
+                continue;
+            }
+
+            if let Some(packet) = recv(subscription)? {
+                self.next_recv_index = (index + 1) % subscription_count;
+                return Ok(Some(packet));
+            }
+        }
+
+        Ok(None)
+    }
+
     /// Leaves the multicast group for the given subscription while keeping the socket bound.
     pub fn leave_subscription(&mut self, id: SubscriptionId) -> Result<(), McrxError> {
         let subscription = self
@@ -271,27 +299,7 @@ impl Context {
     /// Returns the first available packet, if any joined subscription currently has
     /// one ready to be read.
     pub fn try_recv_any(&mut self) -> Result<Option<Packet>, McrxError> {
-        let subscription_count = self.subscriptions.len();
-
-        if subscription_count == 0 {
-            return Ok(None);
-        }
-
-        for offset in 0..subscription_count {
-            let index = (self.next_recv_index + offset) % subscription_count;
-            let subscription = &self.subscriptions[index];
-
-            if !subscription.is_joined() {
-                continue;
-            }
-
-            if let Some(packet) = subscription.try_recv()? {
-                self.next_recv_index = (index + 1) % subscription_count;
-                return Ok(Some(packet));
-            }
-        }
-
-        Ok(None)
+        self.try_recv_from_joined(Subscription::try_recv)
     }
 
     /// Attempts to receive a single packet with richer receive metadata from any
@@ -299,27 +307,7 @@ impl Context {
     ///
     /// This uses the same round-robin fairness logic as `try_recv_any()`.
     pub fn try_recv_any_with_metadata(&mut self) -> Result<Option<PacketWithMetadata>, McrxError> {
-        let subscription_count = self.subscriptions.len();
-
-        if subscription_count == 0 {
-            return Ok(None);
-        }
-
-        for offset in 0..subscription_count {
-            let index = (self.next_recv_index + offset) % subscription_count;
-            let subscription = &self.subscriptions[index];
-
-            if !subscription.is_joined() {
-                continue;
-            }
-
-            if let Some(packet) = subscription.try_recv_with_metadata()? {
-                self.next_recv_index = (index + 1) % subscription_count;
-                return Ok(Some(packet));
-            }
-        }
-
-        Ok(None)
+        self.try_recv_from_joined(Subscription::try_recv_with_metadata)
     }
 
     /// Attempts to receive up to `max_packets` packets from any subscriptions without blocking.
@@ -470,6 +458,7 @@ mod tests {
         #[cfg(any(
             target_os = "linux",
             target_os = "android",
+            windows,
             target_vendor = "apple",
             target_os = "freebsd",
             target_os = "dragonfly",
@@ -487,6 +476,7 @@ mod tests {
         #[cfg(not(any(
             target_os = "linux",
             target_os = "android",
+            windows,
             target_vendor = "apple",
             target_os = "freebsd",
             target_os = "dragonfly",

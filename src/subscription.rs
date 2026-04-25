@@ -3,7 +3,7 @@ use crate::error::McrxError;
 #[cfg(feature = "metrics")]
 use crate::metrics::SubscriptionMetricsSnapshot;
 use crate::packet::{Packet, PacketWithMetadata};
-use crate::platform::{recv_packet, recv_packet_with_metadata, socket_local_addr};
+use crate::platform::{ReceiveSocket, recv_packet, recv_packet_with_metadata, socket_local_addr};
 use socket2::Socket;
 #[cfg(feature = "metrics")]
 use std::cell::{Cell, RefCell};
@@ -46,13 +46,24 @@ struct SubscriptionMetricsInner {
 pub struct Subscription {
     id: SubscriptionId,
     config: SubscriptionConfig,
-    socket: Socket,
+    socket: ReceiveSocket,
     state: SubscriptionState,
     #[cfg(feature = "metrics")]
     metrics: SubscriptionMetricsInner,
 }
 
 impl Subscription {
+    fn with_socket(id: SubscriptionId, config: SubscriptionConfig, socket: ReceiveSocket) -> Self {
+        Self {
+            id,
+            config,
+            socket,
+            state: SubscriptionState::Bound,
+            #[cfg(feature = "metrics")]
+            metrics: SubscriptionMetricsInner::default(),
+        }
+    }
+
     #[cfg(feature = "metrics")]
     fn record_received_packet(&self, packet: &Packet) {
         self.metrics
@@ -88,14 +99,15 @@ impl Subscription {
     /// socket that is compatible with the subscription configuration. For the
     /// checked convenience path, prefer `Context::add_subscription_with_socket()`.
     pub fn new(id: SubscriptionId, config: SubscriptionConfig, socket: Socket) -> Self {
-        Self {
-            id,
-            config,
-            socket,
-            state: SubscriptionState::Bound,
-            #[cfg(feature = "metrics")]
-            metrics: SubscriptionMetricsInner::default(),
-        }
+        Self::with_socket(id, config, ReceiveSocket::adopt(socket))
+    }
+
+    pub(crate) fn from_receive_socket(
+        id: SubscriptionId,
+        config: SubscriptionConfig,
+        socket: ReceiveSocket,
+    ) -> Self {
+        Self::with_socket(id, config, socket)
     }
 
     /// Returns the subscription's ID.
@@ -110,7 +122,7 @@ impl Subscription {
 
     /// Returns a read-only reference to the subscription's socket.
     pub fn socket(&self) -> &Socket {
-        &self.socket
+        self.socket.socket()
     }
 
     /// Attempts to receive a single packet without blocking.
@@ -180,12 +192,23 @@ impl Subscription {
     #[cfg(unix)]
     pub fn as_raw_fd(&self) -> std::os::fd::RawFd {
         use std::os::fd::AsRawFd;
-        self.socket.as_raw_fd()
+        self.socket().as_raw_fd()
+    }
+
+    /// Returns the raw Windows socket handle of the underlying socket.
+    ///
+    /// This is useful for integrating subscriptions into external event loops.
+    #[cfg(windows)]
+    pub fn as_raw_socket(&self) -> std::os::windows::io::RawSocket {
+        use std::os::windows::io::AsRawSocket;
+        self.socket().as_raw_socket()
     }
 
     /// Returns the local socket address currently bound by this subscription.
     pub fn local_addr(&self) -> Result<SocketAddr, McrxError> {
-        socket_local_addr(&self.socket)
+        self.socket
+            .local_addr()
+            .or_else(|_| socket_local_addr(self.socket()))
     }
 
     /// Returns the current lifecycle state of the subscription.
@@ -313,6 +336,7 @@ mod tests {
         #[cfg(any(
             target_os = "linux",
             target_os = "android",
+            windows,
             target_vendor = "apple",
             target_os = "freebsd",
             target_os = "dragonfly",
@@ -330,6 +354,7 @@ mod tests {
         #[cfg(not(any(
             target_os = "linux",
             target_os = "android",
+            windows,
             target_vendor = "apple",
             target_os = "freebsd",
             target_os = "dragonfly",
@@ -347,7 +372,7 @@ mod tests {
     fn try_recv_returns_none_when_no_packet_is_available() {
         let config = sample_config(55020);
         let socket = platform::open_bound_socket(&config).unwrap();
-        let mut subscription = Subscription::new(SubscriptionId(1), config, socket);
+        let mut subscription = Subscription::from_receive_socket(SubscriptionId(1), config, socket);
         platform::join_multicast_group(subscription.socket(), subscription.config()).unwrap();
         subscription.mark_joined().unwrap();
 
@@ -360,7 +385,8 @@ mod tests {
     fn try_recv_receives_packet_sent_to_bound_port() {
         let config = sample_config(55021);
         let socket = platform::open_bound_socket(&config).unwrap();
-        let mut subscription = Subscription::new(SubscriptionId(1), config.clone(), socket);
+        let mut subscription =
+            Subscription::from_receive_socket(SubscriptionId(1), config.clone(), socket);
         platform::join_multicast_group(subscription.socket(), subscription.config()).unwrap();
         subscription.mark_joined().unwrap();
 
@@ -388,7 +414,8 @@ mod tests {
     fn try_recv_with_metadata_exposes_current_socket_context() {
         let config = sample_config(55029);
         let socket = platform::open_bound_socket(&config).unwrap();
-        let mut subscription = Subscription::new(SubscriptionId(1), config.clone(), socket);
+        let mut subscription =
+            Subscription::from_receive_socket(SubscriptionId(1), config.clone(), socket);
         platform::join_multicast_group(subscription.socket(), subscription.config()).unwrap();
         subscription.mark_joined().unwrap();
 
@@ -429,7 +456,8 @@ mod tests {
     fn try_recv_receives_multicast_packet_from_joined_group() {
         let config = sample_config(55022);
         let socket = platform::open_bound_socket(&config).unwrap();
-        let mut subscription = Subscription::new(SubscriptionId(1), config.clone(), socket);
+        let mut subscription =
+            Subscription::from_receive_socket(SubscriptionId(1), config.clone(), socket);
         platform::join_multicast_group(subscription.socket(), subscription.config()).unwrap();
         subscription.mark_joined().unwrap();
 
@@ -457,7 +485,8 @@ mod tests {
         let interface = primary_ipv4();
         let config = test_ssm_config(55023, interface);
         let socket = platform::open_bound_socket(&config).unwrap();
-        let mut subscription = Subscription::new(SubscriptionId(1), config.clone(), socket);
+        let mut subscription =
+            Subscription::from_receive_socket(SubscriptionId(1), config.clone(), socket);
         platform::join_multicast_group(subscription.socket(), subscription.config()).unwrap();
         subscription.mark_joined().unwrap();
 
@@ -487,7 +516,7 @@ mod tests {
     fn mark_joined_transitions_bound_to_joined_state() {
         let config = sample_config(55024);
         let socket = platform::open_bound_socket(&config).unwrap();
-        let mut subscription = Subscription::new(SubscriptionId(1), config, socket);
+        let mut subscription = Subscription::from_receive_socket(SubscriptionId(1), config, socket);
 
         subscription.mark_joined().unwrap();
 
@@ -498,7 +527,7 @@ mod tests {
     fn mark_joined_rejects_already_joined_subscription() {
         let config = sample_config(55025);
         let socket = platform::open_bound_socket(&config).unwrap();
-        let mut subscription = Subscription::new(SubscriptionId(1), config, socket);
+        let mut subscription = Subscription::from_receive_socket(SubscriptionId(1), config, socket);
 
         subscription.mark_joined().unwrap();
         let result = subscription.mark_joined();
@@ -510,7 +539,7 @@ mod tests {
     fn mark_bound_transitions_joined_to_bound_state() {
         let config = sample_config(55026);
         let socket = platform::open_bound_socket(&config).unwrap();
-        let mut subscription = Subscription::new(SubscriptionId(1), config, socket);
+        let mut subscription = Subscription::from_receive_socket(SubscriptionId(1), config, socket);
 
         subscription.mark_joined().unwrap();
         subscription.mark_bound().unwrap();
@@ -522,7 +551,7 @@ mod tests {
     fn mark_bound_rejects_already_bound_subscription() {
         let config = sample_config(55027);
         let socket = platform::open_bound_socket(&config).unwrap();
-        let mut subscription = Subscription::new(SubscriptionId(1), config, socket);
+        let mut subscription = Subscription::from_receive_socket(SubscriptionId(1), config, socket);
 
         let result = subscription.mark_bound();
 
@@ -533,7 +562,8 @@ mod tests {
     fn local_addr_returns_bound_socket_address() {
         let config = sample_config(55028);
         let socket = platform::open_bound_socket(&config).unwrap();
-        let subscription = Subscription::new(SubscriptionId(1), config.clone(), socket);
+        let subscription =
+            Subscription::from_receive_socket(SubscriptionId(1), config.clone(), socket);
 
         let local_addr = subscription.local_addr().unwrap();
 
