@@ -17,6 +17,7 @@ pub use subscription::{Subscription, SubscriptionId, SubscriptionState};
 
 #[cfg(feature = "metrics")]
 pub use metrics::{
-    ContextMetricsDelta, ContextMetricsSampler, ContextMetricsSnapshot, SubscriptionMetricsDelta,
+    ContextMetricsDelta, ContextMetricsSampler, ContextMetricsSnapshot, HardwareMetricsDelta,
+    HardwareMetricsSampler, HardwareMetricsSnapshot, SubscriptionMetricsDelta,
     SubscriptionMetricsSampler, SubscriptionMetricsSnapshot,
 };

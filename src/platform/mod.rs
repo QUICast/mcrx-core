@@ -75,7 +75,7 @@ pub(crate) fn leave_multicast_group(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{SourceFilter, SubscriptionConfig};
+    use crate::config::SubscriptionConfig;
     use std::net::Ipv4Addr;
 
     #[test]

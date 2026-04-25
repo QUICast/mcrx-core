@@ -1,6 +1,9 @@
 use mcrx_core::{Context, SubscriptionConfig};
 #[cfg(feature = "metrics")]
-use mcrx_core::{ContextMetricsDelta, ContextMetricsSampler, ContextMetricsSnapshot};
+use mcrx_core::{
+    ContextMetricsDelta, ContextMetricsSampler, ContextMetricsSnapshot, HardwareMetricsDelta,
+    HardwareMetricsSampler, HardwareMetricsSnapshot,
+};
 use std::env;
 #[cfg(feature = "metrics")]
 use std::fs::OpenOptions;
@@ -86,6 +89,13 @@ fn run() -> Result<(), String> {
     #[cfg(feature = "metrics")]
     let _ = metrics_sampler.sample(ctx.metrics_snapshot());
     #[cfg(feature = "metrics")]
+    let mut hardware_metrics_sampler = HardwareMetricsSampler::new();
+    #[cfg(feature = "metrics")]
+    let _ = hardware_metrics_sampler.sample(
+        HardwareMetricsSnapshot::capture_current_process()
+            .map_err(|err| format!("failed to capture initial hardware metrics: {err}"))?,
+    );
+    #[cfg(feature = "metrics")]
     let mut next_summary_at = summary_interval.map(|interval| Instant::now() + interval);
 
     loop {
@@ -114,6 +124,9 @@ fn run() -> Result<(), String> {
             && Instant::now() >= deadline
         {
             let snapshot = ctx.metrics_snapshot();
+            let hardware_snapshot = HardwareMetricsSnapshot::capture_current_process()
+                .map_err(|err| format!("failed to capture hardware metrics: {err}"))?;
+
             if let Some(delta) = metrics_sampler.sample(snapshot.clone()) {
                 if let Some(path) = &summary_file {
                     write_metrics_summary_jsonl(&snapshot, &delta, path)
@@ -122,6 +135,18 @@ fn run() -> Result<(), String> {
                     print_metrics_summary(&snapshot, &delta);
                 }
             }
+
+            if let Some(delta) = hardware_metrics_sampler.sample(hardware_snapshot.clone()) {
+                if let Some(path) = &summary_file {
+                    write_hardware_metrics_summary_jsonl(&hardware_snapshot, &delta, path)
+                        .map_err(|err| {
+                            format!("failed to write hardware metrics summary: {err}")
+                        })?;
+                } else {
+                    print_hardware_metrics_summary(&hardware_snapshot, &delta);
+                }
+            }
+
             next_summary_at = Some(Instant::now() + interval);
         }
     }
@@ -211,6 +236,23 @@ fn summary_file_from_env() -> Option<PathBuf> {
 }
 
 #[cfg(feature = "metrics")]
+fn hardware_summary_file_path(network_path: &PathBuf) -> PathBuf {
+    let parent = network_path.parent().map(PathBuf::from).unwrap_or_default();
+    let stem = network_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("metrics");
+    let extension = network_path.extension().and_then(|ext| ext.to_str());
+
+    let file_name = match extension {
+        Some(ext) if !ext.is_empty() => format!("{stem}_hardware.{ext}"),
+        _ => format!("{stem}_hardware"),
+    };
+
+    parent.join(file_name)
+}
+
+#[cfg(feature = "metrics")]
 fn unix_timestamp_secs(time: SystemTime) -> f64 {
     time.duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs_f64())
@@ -279,6 +321,67 @@ fn write_metrics_summary_jsonl(
 }
 
 #[cfg(feature = "metrics")]
+fn write_hardware_metrics_summary_jsonl(
+    snapshot: &HardwareMetricsSnapshot,
+    delta: &HardwareMetricsDelta,
+    network_path: &PathBuf,
+) -> Result<(), std::io::Error> {
+    let timestamp_secs = unix_timestamp_secs(snapshot.captured_at);
+    let hardware_path = hardware_summary_file_path(network_path);
+
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let _ = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&hardware_path);
+    });
+
+    let line = format!(
+        concat!(
+            "{{",
+            "\"ts\":{},",
+            "\"interval_secs\":{},",
+            "\"cpu_user_secs\":{},",
+            "\"cpu_system_secs\":{},",
+            "\"cpu_total_secs\":{},",
+            "\"cpu_util_percent\":{},",
+            "\"rss_bytes\":{},",
+            "\"virtual_memory_bytes\":{},",
+            "\"thread_count\":{},",
+            "\"open_fds\":{},",
+            "\"page_faults_minor\":{},",
+            "\"page_faults_major\":{},",
+            "\"ctx_switches_voluntary\":{},",
+            "\"ctx_switches_involuntary\":{}",
+            "}}\n"
+        ),
+        timestamp_secs,
+        delta.interval_secs,
+        delta.cpu_user_secs,
+        delta.cpu_system_secs,
+        delta.cpu_total_secs,
+        delta.cpu_util_percent,
+        delta.rss_bytes,
+        delta.virtual_memory_bytes,
+        delta.thread_count,
+        delta.open_fds,
+        delta.page_faults_minor,
+        delta.page_faults_major,
+        delta.ctx_switches_voluntary,
+        delta.ctx_switches_involuntary,
+    );
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(hardware_path)?;
+    file.write_all(line.as_bytes())?;
+    Ok(())
+}
+
+#[cfg(feature = "metrics")]
 fn print_metrics_summary(snapshot: &ContextMetricsSnapshot, delta: &ContextMetricsDelta) {
     println!("[metrics]");
     println!("  interval_secs:         {:.3}", delta.interval_secs);
@@ -304,6 +407,39 @@ fn print_metrics_summary(snapshot: &ContextMetricsSnapshot, delta: &ContextMetri
     );
 }
 
+#[cfg(feature = "metrics")]
+fn print_hardware_metrics_summary(
+    _snapshot: &HardwareMetricsSnapshot,
+    delta: &HardwareMetricsDelta,
+) {
+    println!("[hardware]");
+    println!("  interval_secs:              {:.3}", delta.interval_secs);
+    println!("  cpu_user_secs:              {:.6}", delta.cpu_user_secs);
+    println!("  cpu_system_secs:            {:.6}", delta.cpu_system_secs);
+    println!("  cpu_total_secs:             {:.6}", delta.cpu_total_secs);
+    println!(
+        "  cpu_util_percent:           {:.3}",
+        delta.cpu_util_percent
+    );
+    println!("  rss_bytes:                  {}", delta.rss_bytes);
+    println!(
+        "  virtual_memory_bytes:       {}",
+        delta.virtual_memory_bytes
+    );
+    println!("  thread_count:               {}", delta.thread_count);
+    println!("  open_fds:                   {}", delta.open_fds);
+    println!("  page_faults_minor:          {}", delta.page_faults_minor);
+    println!("  page_faults_major:          {}", delta.page_faults_major);
+    println!(
+        "  ctx_switches_voluntary:     {}",
+        delta.ctx_switches_voluntary
+    );
+    println!(
+        "  ctx_switches_involuntary:   {}",
+        delta.ctx_switches_involuntary
+    );
+}
+
 fn print_usage(program: &str) {
     eprintln!("Usage:");
     eprintln!("  {program} <group> <dst_port> [source] [interface]");
@@ -324,7 +460,7 @@ fn print_usage(program: &str) {
         eprintln!("Metrics (when built with --features metrics):");
         eprintln!("  MCRX_METRICS_SUMMARY_SECS=<n>   emit a delta metrics summary every n seconds");
         eprintln!(
-            "  MCRX_METRICS_SUMMARY_FILE=<p>   append JSONL delta metrics summaries to file <p>"
+            "  MCRX_METRICS_SUMMARY_FILE=<p>   write network metrics to <p> and hardware metrics to a sibling *_hardware file"
         );
     }
 }
