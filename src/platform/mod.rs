@@ -77,6 +77,10 @@ impl ReceiveSocket {
         &self.socket
     }
 
+    pub(crate) fn socket_mut(&mut self) -> &mut Socket {
+        &mut self.socket
+    }
+
     pub(crate) fn local_addr(&self) -> Result<SocketAddr, McrxError> {
         self.local_addr
             .or_else(|| try_socket_local_addr(&self.socket).ok())
@@ -103,6 +107,10 @@ impl ReceiveSocket {
     #[cfg(windows)]
     fn wsarecvmsg(&self) -> Option<WsaRecvMsgFn> {
         self.wsarecvmsg
+    }
+
+    pub(crate) fn into_socket(self) -> Socket {
+        self.socket
     }
 }
 

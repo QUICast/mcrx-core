@@ -71,6 +71,23 @@ impl Context {
         id
     }
 
+    fn finish_subscription_removal(&mut self, index: usize) -> Subscription {
+        let removed = self.subscriptions.swap_remove(index);
+
+        if self.subscriptions.is_empty() {
+            self.next_recv_index = 0;
+        } else {
+            self.next_recv_index %= self.subscriptions.len();
+        }
+
+        #[cfg(feature = "metrics")]
+        self.metrics
+            .subscriptions_removed
+            .set(self.metrics.subscriptions_removed.get() + 1);
+
+        removed
+    }
+
     /// Creates an empty context with no subscriptions.
     pub fn new() -> Self {
         Self {
@@ -193,28 +210,22 @@ impl Context {
     ///
     /// This uses `swap_remove`, so subscription order is not preserved.
     pub fn remove_subscription(&mut self, id: SubscriptionId) -> bool {
-        if let Some(index) = self
+        self.take_subscription(id).is_some()
+    }
+
+    /// Removes the subscription with the given ID and returns it to the caller.
+    ///
+    /// This preserves the current socket ownership and lifecycle state, which is
+    /// useful when moving a subscription into an external event loop or runtime.
+    ///
+    /// This uses `swap_remove`, so subscription order is not preserved.
+    pub fn take_subscription(&mut self, id: SubscriptionId) -> Option<Subscription> {
+        let index = self
             .subscriptions
             .iter()
-            .position(|subscription| subscription.id() == id)
-        {
-            self.subscriptions.swap_remove(index);
+            .position(|subscription| subscription.id() == id)?;
 
-            if self.subscriptions.is_empty() {
-                self.next_recv_index = 0;
-            } else {
-                self.next_recv_index %= self.subscriptions.len();
-            }
-
-            #[cfg(feature = "metrics")]
-            self.metrics
-                .subscriptions_removed
-                .set(self.metrics.subscriptions_removed.get() + 1);
-
-            true
-        } else {
-            false
-        }
+        Some(self.finish_subscription_removal(index))
     }
 
     /// Joins the multicast group for the given subscription.
@@ -289,6 +300,11 @@ impl Context {
     /// Returns a read-only slice of all subscriptions currently stored in the context.
     pub fn subscriptions(&self) -> &[Subscription] {
         &self.subscriptions
+    }
+
+    /// Returns a mutable slice of all subscriptions currently stored in the context.
+    pub fn subscriptions_mut(&mut self) -> &mut [Subscription] {
+        &mut self.subscriptions
     }
 
     /// Attempts to receive a single packet from any joined subscription without blocking.
@@ -583,6 +599,70 @@ mod tests {
         let removed = context.remove_subscription(SubscriptionId(999));
 
         assert!(!removed);
+    }
+
+    #[test]
+    fn take_subscription_returns_owned_subscription_and_removes_it() {
+        let mut context = Context::new();
+        let config = sample_config(5010);
+        let id = context.add_subscription(config.clone()).unwrap();
+        context.join_subscription(id).unwrap();
+
+        let subscription = context.take_subscription(id).unwrap();
+
+        assert_eq!(subscription.id(), id);
+        assert_eq!(subscription.config(), &config);
+        assert_eq!(subscription.state(), SubscriptionState::Joined);
+        assert_eq!(context.subscription_count(), 0);
+        assert!(!context.contains_subscription(id));
+    }
+
+    #[test]
+    fn taken_subscription_can_be_split_into_owned_parts() {
+        let mut context = Context::new();
+        let config = sample_config(5011);
+        let id = context.add_subscription(config.clone()).unwrap();
+        context.join_subscription(id).unwrap();
+
+        let subscription = context.take_subscription(id).unwrap();
+        let parts = subscription.into_parts();
+
+        assert_eq!(parts.id, id);
+        assert_eq!(parts.config, config);
+        assert_eq!(parts.state, SubscriptionState::Joined);
+
+        let local_addr = parts.socket.local_addr().unwrap().as_socket().unwrap();
+        assert_eq!(local_addr.port(), parts.config.dst_port);
+    }
+
+    #[test]
+    fn taken_joined_subscription_can_still_receive_packets() {
+        let mut context = Context::new();
+        let config = sample_config(5012);
+        let id = context.add_subscription(config.clone()).unwrap();
+        context.join_subscription(id).unwrap();
+
+        let subscription = context.take_subscription(id).unwrap();
+        let sender = make_multicast_sender();
+        let payload = b"context take_subscription handoff";
+
+        sender
+            .send_to(payload, SocketAddrV4::new(config.group, config.dst_port))
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let packet = loop {
+            match subscription.try_recv().unwrap() {
+                Some(packet) => break packet,
+                None if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+                None => panic!("timed out waiting for packet after subscription handoff"),
+            }
+        };
+
+        assert_eq!(packet.subscription_id, id);
+        assert_eq!(packet.group, std::net::IpAddr::V4(config.group));
+        assert_eq!(packet.dst_port, config.dst_port);
+        assert_eq!(&packet.payload[..], payload);
     }
 
     #[test]

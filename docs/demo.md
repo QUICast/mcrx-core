@@ -6,6 +6,7 @@ The repository provides three small demo binaries:
 
 - `mcrx_recv`
 - `mcrx_recv_meta`
+- `mcrx_tokio_recv` (with `--features tokio`)
 - `mcrx_send`
 
 These are intended for real-network testing and API validation across devices.
@@ -67,6 +68,21 @@ Example:
 
 ```bash
 cargo run --bin mcrx_recv_meta -- 239.1.2.3 5000
+```
+
+## Tokio Receiver
+
+```bash
+cargo run --features tokio --bin mcrx_tokio_recv -- <group> <dst_port> [source] [interface]
+```
+
+This variant extracts the joined subscription from the `Context`, wraps it in
+`TokioSubscription`, and awaits packets asynchronously.
+
+Example:
+
+```bash
+cargo run --features tokio --bin mcrx_tokio_recv -- 239.1.2.3 5000
 ```
 
 ## Sender
@@ -162,6 +178,7 @@ MCRX_METRICS_SUMMARY_SECS=2 MCRX_METRICS_SUMMARY_FILE=metrics.jsonl cargo run --
 
 - receiver uses a simple non-blocking polling loop
 - `mcrx_recv_meta` is useful when validating interface-sensitive metadata wiring
+- `mcrx_tokio_recv` demonstrates the optional Tokio adapter and subscription handoff path
 - summaries are delta-based, not cumulative
 - file output is append-only during a run
 - the JSONL file is cleared once at program start before summaries are appended

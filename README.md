@@ -18,6 +18,8 @@ Designed to be:
 - Non-blocking receive API
 - Multiple concurrent subscriptions
 - Caller-provided socket support via `add_subscription_with_socket()`
+- Event-loop friendly socket borrowing and extraction APIs
+- Optional Tokio adapter via the `tokio` feature
 - Structured receive metadata via `PacketWithMetadata`
 - IPv4 pktinfo-style destination/interface metadata on supported Unix and Windows platforms
 - Zero-copy-friendly payload handling via `bytes::Bytes`
@@ -67,6 +69,32 @@ let id = ctx.add_subscription_with_socket(config, socket)?;
 ctx.join_subscription(id)?;
 ```
 
+For external event loops, you can either borrow the live socket from a
+subscription or take the whole subscription back out of the context:
+
+```rust
+let subscription = ctx.get_subscription(id).unwrap();
+let socket = subscription.socket();
+
+#[cfg(unix)]
+let raw = subscription.as_raw_fd();
+
+let owned = ctx.take_subscription(id).unwrap();
+let parts = owned.into_parts();
+let socket = parts.socket;
+```
+
+With the optional Tokio adapter enabled, you can wrap an extracted subscription
+and await packets asynchronously:
+
+```rust
+use mcrx_core::TokioSubscription;
+
+let subscription = ctx.take_subscription(id).unwrap();
+let subscription = TokioSubscription::new(subscription)?;
+let packet = subscription.recv_with_metadata().await?;
+```
+
 ---
 
 ## 📚 Documentation
@@ -91,6 +119,12 @@ Metadata-aware receiver:
 
 ```bash
 cargo run --bin mcrx_recv_meta -- 239.1.2.3 5000
+```
+
+Tokio receiver:
+
+```bash
+cargo run --features tokio --bin mcrx_tokio_recv -- 239.1.2.3 5000
 ```
 
 Sender:

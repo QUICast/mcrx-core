@@ -59,6 +59,21 @@ join/leave/receive behavior inside `mcrx-core`, while routing raw socket
 operations through the `platform` module so future IPv6, richer receive metadata,
 and alternate backends can plug in with less churn.
 
+For event-loop integration, the library now supports two ownership modes:
+
+- borrow the socket from a live `Subscription` via `socket()`, `socket_mut()`,
+  `as_raw_fd()`, or `as_raw_socket()`
+- extract the whole `Subscription` from a `Context` via `take_subscription()`
+  and move its owned socket into another loop or runtime
+
+This keeps the default API simple while making ownership transfer explicit
+instead of forcing callers to rebuild subscription state around a raw socket.
+
+An optional Tokio layer now builds on top of that ownership model instead of
+changing the core API. `TokioSubscription` wraps an owned `Subscription` after
+`take_subscription()`, so the async path reuses the same join/leave/receive
+logic rather than introducing a second socket management model.
+
 ## Staged Receive Metadata
 
 The original `Packet` type stays small and stable for callers that only need the

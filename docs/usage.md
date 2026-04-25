@@ -57,11 +57,88 @@ The supplied socket is switched to non-blocking mode, but multicast join/leave
 still flows through `join_subscription()` and `leave_subscription()` in this
 first integration step.
 
+## Event Loop Integration
+
+There are now two intended integration styles for external event loops.
+
+Borrowing a live socket while the subscription stays inside the `Context`:
+
+```rust
+let subscription = ctx.get_subscription(id).unwrap();
+let socket = subscription.socket();
+
+#[cfg(unix)]
+let raw = subscription.as_raw_fd();
+
+#[cfg(windows)]
+let raw = subscription.as_raw_socket();
+```
+
+If a registry API requires mutable socket access during registration, use:
+
+```rust
+for subscription in ctx.subscriptions_mut() {
+    let id = subscription.id();
+    let socket = subscription.socket_mut();
+    let _ = (id, socket);
+}
+```
+
+Taking ownership back out of the `Context` for handoff into another runtime:
+
+```rust
+let subscription = ctx.take_subscription(id).unwrap();
+let parts = subscription.into_parts();
+
+println!("taken subscription {}", parts.id.0);
+println!("state at handoff: {:?}", parts.state);
+
+let socket = parts.socket;
+```
+
+`take_subscription()` does not implicitly leave the multicast group. It
+preserves the current socket ownership and lifecycle state so the caller can
+continue receiving immediately in another loop if desired.
+
+## Tokio Integration
+
+Enable the optional `tokio` feature when you want an async wrapper over an
+owned subscription:
+
+```bash
+cargo run --features tokio --bin mcrx_tokio_recv -- 239.1.2.3 5000
+```
+
+The library also exposes a thin adapter type:
+
+```rust
+use mcrx_core::TokioSubscription;
+
+let subscription = ctx.take_subscription(id).unwrap();
+let subscription = TokioSubscription::new(subscription)?;
+
+let packet = subscription.recv().await?;
+let detailed = subscription.recv_with_metadata().await?;
+```
+
+On Unix this waits for socket readiness via Tokio's `AsyncFd`. On other
+platforms it currently falls back to an async sleep-and-poll loop around the
+same non-blocking receive APIs.
+
 ## Leaving and Removing a Subscription
 
 ```rust
 ctx.leave_subscription(id)?;
 ctx.remove_subscription(id);
+```
+
+If you need the owned subscription back instead of dropping it, use:
+
+```rust
+if let Some(subscription) = ctx.take_subscription(id) {
+    let socket = subscription.into_socket();
+    drop(socket);
+}
 ```
 
 ## Receiving from Any Subscription

@@ -27,6 +27,20 @@ pub enum SubscriptionState {
     Joined,
 }
 
+/// Owned subscription state that can be extracted from a context and moved into
+/// another event loop or runtime.
+#[derive(Debug)]
+pub struct SubscriptionParts {
+    /// The subscription's ID inside the originating context.
+    pub id: SubscriptionId,
+    /// The multicast configuration associated with the socket.
+    pub config: SubscriptionConfig,
+    /// The owned socket for external integration.
+    pub socket: Socket,
+    /// The lifecycle state at the time of extraction.
+    pub state: SubscriptionState,
+}
+
 #[cfg(feature = "metrics")]
 #[derive(Debug, Default)]
 struct SubscriptionMetricsInner {
@@ -125,6 +139,14 @@ impl Subscription {
         self.socket.socket()
     }
 
+    /// Returns a mutable reference to the subscription's socket.
+    ///
+    /// This is useful when an external event loop or registry needs mutable
+    /// socket access during registration.
+    pub fn socket_mut(&mut self) -> &mut Socket {
+        self.socket.socket_mut()
+    }
+
     /// Attempts to receive a single packet without blocking.
     ///
     /// Returns:
@@ -211,6 +233,24 @@ impl Subscription {
             .or_else(|_| socket_local_addr(self.socket()))
     }
 
+    /// Consumes the subscription and returns its owned socket.
+    ///
+    /// This is useful when handing a joined or bound socket off to an external
+    /// event loop or async runtime.
+    pub fn into_socket(self) -> Socket {
+        self.socket.into_socket()
+    }
+
+    /// Consumes the subscription and returns all owned parts.
+    pub fn into_parts(self) -> SubscriptionParts {
+        SubscriptionParts {
+            id: self.id,
+            config: self.config,
+            socket: self.socket.into_socket(),
+            state: self.state,
+        }
+    }
+
     /// Returns the current lifecycle state of the subscription.
     ///
     /// This can be used by callers to inspect whether the subscription is
@@ -287,6 +327,34 @@ impl Subscription {
             .set(self.metrics.leave_count.get() + 1);
 
         Ok(())
+    }
+}
+
+#[cfg(unix)]
+impl std::os::fd::AsFd for Subscription {
+    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        self.socket().as_fd()
+    }
+}
+
+#[cfg(unix)]
+impl std::os::fd::AsRawFd for Subscription {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        self.socket().as_raw_fd()
+    }
+}
+
+#[cfg(windows)]
+impl std::os::windows::io::AsSocket for Subscription {
+    fn as_socket(&self) -> std::os::windows::io::BorrowedSocket<'_> {
+        self.socket().as_socket()
+    }
+}
+
+#[cfg(windows)]
+impl std::os::windows::io::AsRawSocket for Subscription {
+    fn as_raw_socket(&self) -> std::os::windows::io::RawSocket {
+        self.socket().as_raw_socket()
     }
 }
 
