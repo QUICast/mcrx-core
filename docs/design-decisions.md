@@ -21,7 +21,9 @@ one context object.
 The library uses a pull-based, non-blocking API:
 
 - `Subscription::try_recv()`
+- `Subscription::try_recv_with_metadata()`
 - `Context::try_recv_any()`
+- `Context::try_recv_any_with_metadata()`
 - `Context::try_recv_batch_into()`
 - `Context::try_recv_all_into()`
 
@@ -56,6 +58,25 @@ embedders that need to control socket creation themselves. The current step keep
 join/leave/receive behavior inside `mcrx-core`, while routing raw socket
 operations through the `platform` module so future IPv6, richer receive metadata,
 and alternate backends can plug in with less churn.
+
+## Staged Receive Metadata
+
+The original `Packet` type stays small and stable for callers that only need the
+core addressing tuple plus payload.
+
+The richer path uses `PacketWithMetadata`, which wraps a `Packet` plus a
+non-exhaustive `ReceiveMetadata` struct. The first step intentionally exposes
+metadata in layers:
+
+- socket local address
+- configured join interface
+- pktinfo-style destination local IP on supported Unix and Windows IPv4 platforms
+- pktinfo-style ingress interface index on supported Unix and Windows IPv4 platforms
+
+Where the platform layer does not provide those ancillary messages yet, the
+pktinfo-derived fields remain `None`. This lets integrators adopt the richer
+type now without forcing a breaking redesign each time a new OS-specific
+metadata source gets wired in.
 
 ## Metrics Model
 

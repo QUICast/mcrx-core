@@ -2,9 +2,10 @@
 
 ## Overview
 
-The repository provides two small demo binaries:
+The repository provides three small demo binaries:
 
 - `mcrx_recv`
+- `mcrx_recv_meta`
 - `mcrx_send`
 
 These are intended for real-network testing and API validation across devices.
@@ -47,6 +48,26 @@ Rules:
 - omit `source` for ASM
 - provide `source` for SSM
 - `interface` is optional and selects the local join interface
+
+## Metadata-aware Receiver
+
+```bash
+cargo run --bin mcrx_recv_meta -- <group> <dst_port> [source] [interface]
+```
+
+This variant uses `try_recv_any_with_metadata()` and prints the richer receive
+metadata alongside each packet, including:
+
+- socket local bind address
+- configured join interface
+- pktinfo-style destination local IP when the platform reports it
+- pktinfo-style ingress interface index when the platform reports it
+
+Example:
+
+```bash
+cargo run --bin mcrx_recv_meta -- 239.1.2.3 5000
+```
 
 ## Sender
 
@@ -140,6 +161,7 @@ MCRX_METRICS_SUMMARY_SECS=2 MCRX_METRICS_SUMMARY_FILE=metrics.jsonl cargo run --
 ## Notes
 
 - receiver uses a simple non-blocking polling loop
+- `mcrx_recv_meta` is useful when validating interface-sensitive metadata wiring
 - summaries are delta-based, not cumulative
 - file output is append-only during a run
 - the JSONL file is cleared once at program start before summaries are appended

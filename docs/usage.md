@@ -85,6 +85,39 @@ if let Some(packet) = subscription.try_recv()? {
 }
 ```
 
+## Receiving with Richer Metadata
+
+When you need more than source/group/port, use the metadata-aware receive APIs:
+
+```rust
+let subscription = ctx.get_subscription(id).unwrap();
+if let Some(packet) = subscription.try_recv_with_metadata()? {
+    println!("received {} bytes", packet.packet.payload.len());
+    println!("socket addr: {:?}", packet.metadata.socket_local_addr);
+    println!("configured interface: {:?}", packet.metadata.configured_interface);
+    println!("destination ip: {:?}", packet.metadata.destination_local_ip);
+    println!("ingress ifindex: {:?}", packet.metadata.ingress_interface_index);
+}
+```
+
+The `Context` offers matching helpers:
+
+```rust
+if let Some(packet) = ctx.try_recv_any_with_metadata()? {
+    println!("received on subscription {}", packet.packet.subscription_id.0);
+}
+```
+
+Today the richer metadata surface exposes:
+
+- the socket's current local bind address
+- the configured join interface from `SubscriptionConfig`
+- pktinfo-style destination local IP on supported Unix and Windows IPv4 platforms
+- pktinfo-style ingress interface index on supported Unix and Windows IPv4 platforms
+
+On platforms where those ancillary control messages are not wired yet, the
+pktinfo-derived fields remain `None`.
+
 You can also inspect the local bind address for a subscription:
 
 ```rust

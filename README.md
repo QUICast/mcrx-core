@@ -18,6 +18,8 @@ Designed to be:
 - Non-blocking receive API
 - Multiple concurrent subscriptions
 - Caller-provided socket support via `add_subscription_with_socket()`
+- Structured receive metadata via `PacketWithMetadata`
+- IPv4 pktinfo-style destination/interface metadata on supported Unix and Windows platforms
 - Zero-copy-friendly payload handling via `bytes::Bytes`
 - Cross-platform design
 - Explicit subscription lifecycle (`add`, `join`, `leave`, `remove`)
@@ -85,6 +87,12 @@ Receiver:
 cargo run --bin mcrx_recv -- 239.1.2.3 5000
 ```
 
+Metadata-aware receiver:
+
+```bash
+cargo run --bin mcrx_recv_meta -- 239.1.2.3 5000
+```
+
 Sender:
 
 ```bash
@@ -101,7 +109,7 @@ See [docs/demo.md](docs/demo.md) for full CLI and metrics documentation.
 |---------|-----|-----|----------|
 | macOS   | ✅   | ✅   | Verified |
 | Linux   | ✅   | ✅   | Verified |
-| Windows | ✅   | ✅   | Verified |
+| Windows | ✅   | ✅   | Build-checked (`x86_64-pc-windows-msvc`) |
 
 ---
 

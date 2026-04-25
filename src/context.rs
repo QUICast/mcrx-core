@@ -1,6 +1,6 @@
 use crate::config::SubscriptionConfig;
 use crate::error::McrxError;
-use crate::packet::Packet;
+use crate::packet::{Packet, PacketWithMetadata};
 use crate::platform::{
     join_multicast_group, leave_multicast_group, open_bound_socket, prepare_existing_socket,
 };
@@ -294,6 +294,34 @@ impl Context {
         Ok(None)
     }
 
+    /// Attempts to receive a single packet with richer receive metadata from any
+    /// joined subscription without blocking.
+    ///
+    /// This uses the same round-robin fairness logic as `try_recv_any()`.
+    pub fn try_recv_any_with_metadata(&mut self) -> Result<Option<PacketWithMetadata>, McrxError> {
+        let subscription_count = self.subscriptions.len();
+
+        if subscription_count == 0 {
+            return Ok(None);
+        }
+
+        for offset in 0..subscription_count {
+            let index = (self.next_recv_index + offset) % subscription_count;
+            let subscription = &self.subscriptions[index];
+
+            if !subscription.is_joined() {
+                continue;
+            }
+
+            if let Some(packet) = subscription.try_recv_with_metadata()? {
+                self.next_recv_index = (index + 1) % subscription_count;
+                return Ok(Some(packet));
+            }
+        }
+
+        Ok(None)
+    }
+
     /// Attempts to receive up to `max_packets` packets from any subscriptions without blocking.
     ///
     /// This method repeatedly calls `try_recv_any()` using the same round-robin fairness logic
@@ -335,6 +363,38 @@ impl Context {
         Ok(received)
     }
 
+    /// Attempts to receive up to `max_packets` packets with richer receive
+    /// metadata from any subscriptions without blocking.
+    pub fn try_recv_batch_with_metadata_into(
+        &mut self,
+        out: &mut Vec<PacketWithMetadata>,
+        max_packets: usize,
+    ) -> Result<usize, McrxError> {
+        let mut received = 0;
+
+        #[cfg(feature = "metrics")]
+        self.metrics
+            .batch_calls
+            .set(self.metrics.batch_calls.get() + 1);
+
+        for _ in 0..max_packets {
+            match self.try_recv_any_with_metadata()? {
+                Some(packet) => {
+                    out.push(packet);
+                    received += 1;
+                }
+                None => break,
+            }
+        }
+
+        #[cfg(feature = "metrics")]
+        self.metrics
+            .batch_packets_received
+            .set(self.metrics.batch_packets_received.get() + received as u64);
+
+        Ok(received)
+    }
+
     /// Attempts to receive all currently available packets without blocking.
     ///
     /// This is a convenience wrapper around `try_recv_batch_into` that continues
@@ -348,6 +408,26 @@ impl Context {
 
         loop {
             let received = self.try_recv_batch_into(out, usize::MAX)?;
+            total_received += received;
+
+            if received == 0 {
+                break;
+            }
+        }
+
+        Ok(total_received)
+    }
+
+    /// Attempts to receive all currently available packets with richer receive
+    /// metadata without blocking.
+    pub fn try_recv_all_with_metadata_into(
+        &mut self,
+        out: &mut Vec<PacketWithMetadata>,
+    ) -> Result<usize, McrxError> {
+        let mut total_received = 0;
+
+        loop {
+            let received = self.try_recv_batch_with_metadata_into(out, usize::MAX)?;
             total_received += received;
 
             if received == 0 {
@@ -381,6 +461,43 @@ mod tests {
             )))
             .unwrap();
         socket
+    }
+
+    fn assert_pktinfo_metadata(
+        packet: &PacketWithMetadata,
+        expected_destination: std::net::IpAddr,
+    ) {
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "android",
+            target_vendor = "apple",
+            target_os = "freebsd",
+            target_os = "dragonfly",
+            target_os = "netbsd",
+            target_os = "openbsd"
+        ))]
+        {
+            assert_eq!(
+                packet.metadata.destination_local_ip,
+                Some(expected_destination)
+            );
+            assert!(packet.metadata.ingress_interface_index.is_some());
+        }
+
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "android",
+            target_vendor = "apple",
+            target_os = "freebsd",
+            target_os = "dragonfly",
+            target_os = "netbsd",
+            target_os = "openbsd"
+        )))]
+        {
+            let _ = expected_destination;
+            assert_eq!(packet.metadata.destination_local_ip, None);
+            assert_eq!(packet.metadata.ingress_interface_index, None);
+        }
     }
 
     fn send_round_robin_test_packets(
@@ -620,6 +737,45 @@ mod tests {
     }
 
     #[test]
+    fn try_recv_any_with_metadata_returns_packet_from_ready_subscription() {
+        let mut context = Context::new();
+        let config = sample_config(9030);
+        let id = context.add_subscription(config.clone()).unwrap();
+        context.join_subscription(id).unwrap();
+
+        let sender = make_multicast_sender();
+
+        let payload = b"context try_recv_any_with_metadata";
+        sender
+            .send_to(payload, SocketAddrV4::new(config.group, config.dst_port))
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let packet = loop {
+            match context.try_recv_any_with_metadata().unwrap() {
+                Some(packet) => break packet,
+                None if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                None => panic!("timed out waiting for packet with metadata from context"),
+            }
+        };
+
+        assert_eq!(packet.packet.subscription_id, id);
+        assert_eq!(packet.packet.group, std::net::IpAddr::V4(config.group));
+        assert_eq!(packet.packet.dst_port, config.dst_port);
+        assert_eq!(&packet.packet.payload[..], payload);
+        assert_pktinfo_metadata(&packet, std::net::IpAddr::V4(config.group));
+        assert_eq!(
+            packet.metadata.socket_local_addr,
+            Some(std::net::SocketAddr::V4(SocketAddrV4::new(
+                Ipv4Addr::UNSPECIFIED,
+                config.dst_port,
+            )))
+        );
+    }
+
+    #[test]
     fn try_recv_any_works_with_caller_provided_socket() {
         let mut context = Context::new();
         let config = sample_config(9031);
@@ -731,6 +887,66 @@ mod tests {
     }
 
     #[test]
+    fn try_recv_batch_with_metadata_into_receives_up_to_max_packets() {
+        let mut context = Context::new();
+        let first_config = sample_config(9070);
+        let second_config = sample_config(9080);
+
+        let first_id = context.add_subscription(first_config.clone()).unwrap();
+        context.join_subscription(first_id).unwrap();
+        let second_id = context.add_subscription(second_config.clone()).unwrap();
+        context.join_subscription(second_id).unwrap();
+
+        send_round_robin_test_packets(&first_config, &second_config);
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut packets = Vec::new();
+
+        while packets.len() < 2 && Instant::now() < deadline {
+            context
+                .try_recv_batch_with_metadata_into(&mut packets, 2)
+                .unwrap();
+
+            if packets.len() < 2 {
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        assert_eq!(packets.len(), 2);
+
+        assert_eq!(
+            (
+                packets[0].packet.subscription_id,
+                &packets[0].packet.payload[..]
+            ),
+            (first_id, b"first-1".as_slice())
+        );
+
+        assert_eq!(
+            (
+                packets[1].packet.subscription_id,
+                &packets[1].packet.payload[..]
+            ),
+            (second_id, b"second-1".as_slice())
+        );
+
+        assert_eq!(
+            packets[0].metadata.socket_local_addr,
+            Some(std::net::SocketAddr::V4(SocketAddrV4::new(
+                Ipv4Addr::UNSPECIFIED,
+                first_config.dst_port,
+            )))
+        );
+        assert_eq!(
+            packets[1].metadata.socket_local_addr,
+            Some(std::net::SocketAddr::V4(SocketAddrV4::new(
+                Ipv4Addr::UNSPECIFIED,
+                second_config.dst_port,
+            )))
+        );
+    }
+
+    #[test]
     fn try_recv_all_into_drains_all_available_packets() {
         let mut context = Context::new();
         let first_config = sample_config(9009);
@@ -768,6 +984,59 @@ mod tests {
 
         assert_eq!(
             (packets[2].subscription_id, &packets[2].payload[..]),
+            (first_id, b"first-2".as_slice())
+        );
+    }
+
+    #[test]
+    fn try_recv_all_with_metadata_into_drains_all_available_packets() {
+        let mut context = Context::new();
+        let first_config = sample_config(9090);
+        let second_config = sample_config(9100);
+
+        let first_id = context.add_subscription(first_config.clone()).unwrap();
+        context.join_subscription(first_id).unwrap();
+        let second_id = context.add_subscription(second_config.clone()).unwrap();
+        context.join_subscription(second_id).unwrap();
+
+        send_round_robin_test_packets(&first_config, &second_config);
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut packets = Vec::new();
+
+        while packets.len() < 3 && Instant::now() < deadline {
+            context
+                .try_recv_all_with_metadata_into(&mut packets)
+                .unwrap();
+
+            if packets.len() < 3 {
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        assert_eq!(packets.len(), 3);
+
+        assert_eq!(
+            (
+                packets[0].packet.subscription_id,
+                &packets[0].packet.payload[..]
+            ),
+            (first_id, b"first-1".as_slice())
+        );
+
+        assert_eq!(
+            (
+                packets[1].packet.subscription_id,
+                &packets[1].packet.payload[..]
+            ),
+            (second_id, b"second-1".as_slice())
+        );
+
+        assert_eq!(
+            (
+                packets[2].packet.subscription_id,
+                &packets[2].packet.payload[..]
+            ),
             (first_id, b"first-2".as_slice())
         );
     }

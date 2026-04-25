@@ -12,7 +12,7 @@ mod test_support;
 pub use config::{SourceFilter, SubscriptionConfig};
 pub use context::Context;
 pub use error::McrxError;
-pub use packet::Packet;
+pub use packet::{Packet, PacketWithMetadata, ReceiveMetadata};
 pub use subscription::{Subscription, SubscriptionId, SubscriptionState};
 
 #[cfg(feature = "metrics")]

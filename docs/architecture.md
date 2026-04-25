@@ -47,6 +47,12 @@ A `Packet` represents one received UDP datagram plus metadata:
 - destination port
 - payload
 
+For integrations that need richer receive context, `PacketWithMetadata` wraps a
+`Packet` together with a `ReceiveMetadata` struct. The current metadata surface
+captures socket-level context plus pktinfo-style destination/interface details
+on supported Unix and Windows IPv4 platforms, while still leaving room for
+future expansion.
+
 ## Data Flow
 
 ```mermaid

@@ -48,6 +48,10 @@ pub enum McrxError {
     #[error("MCRX: failed to read local address from existing socket: {0}")]
     SocketLocalAddrFailed(io::Error),
 
+    /// Looking up a socket extension function failed.
+    #[error("MCRX: failed to look up socket extension function: {0}")]
+    SocketIoctlFailed(io::Error),
+
     /// The provided existing socket does not match the current IPv4-only receive model.
     #[error("MCRX: existing socket must be an IPv4 UDP socket")]
     ExistingSocketMustBeIpv4,

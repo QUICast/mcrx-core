@@ -2,8 +2,8 @@ use crate::config::SubscriptionConfig;
 use crate::error::McrxError;
 #[cfg(feature = "metrics")]
 use crate::metrics::SubscriptionMetricsSnapshot;
-use crate::packet::Packet;
-use crate::platform::{recv_packet, socket_local_addr};
+use crate::packet::{Packet, PacketWithMetadata};
+use crate::platform::{recv_packet, recv_packet_with_metadata, socket_local_addr};
 use socket2::Socket;
 #[cfg(feature = "metrics")]
 use std::cell::{Cell, RefCell};
@@ -53,6 +53,35 @@ pub struct Subscription {
 }
 
 impl Subscription {
+    #[cfg(feature = "metrics")]
+    fn record_received_packet(&self, packet: &Packet) {
+        self.metrics
+            .packets_received
+            .set(self.metrics.packets_received.get() + 1);
+        self.metrics
+            .bytes_received
+            .set(self.metrics.bytes_received.get() + packet.payload.len() as u64);
+        self.metrics
+            .last_payload_len
+            .set(Some(packet.payload.len()));
+        *self.metrics.last_source.borrow_mut() = Some(packet.source);
+        *self.metrics.last_receive_at.borrow_mut() = Some(SystemTime::now());
+    }
+
+    #[cfg(feature = "metrics")]
+    fn record_would_block(&self) {
+        self.metrics
+            .would_block_count
+            .set(self.metrics.would_block_count.get() + 1);
+    }
+
+    #[cfg(feature = "metrics")]
+    fn record_receive_error(&self) {
+        self.metrics
+            .receive_errors
+            .set(self.metrics.receive_errors.get() + 1);
+    }
+
     /// Creates a new subscription from an ID, configuration, and socket.
     ///
     /// This is a low-level constructor. Callers are responsible for providing a
@@ -97,35 +126,48 @@ impl Subscription {
         match recv_packet(&self.socket, self.id, &self.config) {
             Ok(Some(packet)) => {
                 #[cfg(feature = "metrics")]
-                {
-                    self.metrics
-                        .packets_received
-                        .set(self.metrics.packets_received.get() + 1);
-                    self.metrics
-                        .bytes_received
-                        .set(self.metrics.bytes_received.get() + packet.payload.len() as u64);
-                    self.metrics
-                        .last_payload_len
-                        .set(Some(packet.payload.len()));
-                    *self.metrics.last_source.borrow_mut() = Some(packet.source);
-                    *self.metrics.last_receive_at.borrow_mut() = Some(SystemTime::now());
-                }
+                self.record_received_packet(&packet);
 
                 Ok(Some(packet))
             }
             Ok(None) => {
                 #[cfg(feature = "metrics")]
-                self.metrics
-                    .would_block_count
-                    .set(self.metrics.would_block_count.get() + 1);
+                self.record_would_block();
 
                 Ok(None)
             }
             Err(err) => {
                 #[cfg(feature = "metrics")]
-                self.metrics
-                    .receive_errors
-                    .set(self.metrics.receive_errors.get() + 1);
+                self.record_receive_error();
+
+                Err(err)
+            }
+        }
+    }
+
+    /// Attempts to receive a single packet together with richer receive metadata
+    /// without blocking.
+    pub fn try_recv_with_metadata(&self) -> Result<Option<PacketWithMetadata>, McrxError> {
+        if !self.is_joined() {
+            return Err(McrxError::SubscriptionNotJoined);
+        }
+
+        match recv_packet_with_metadata(&self.socket, self.id, &self.config) {
+            Ok(Some(packet)) => {
+                #[cfg(feature = "metrics")]
+                self.record_received_packet(&packet.packet);
+
+                Ok(Some(packet))
+            }
+            Ok(None) => {
+                #[cfg(feature = "metrics")]
+                self.record_would_block();
+
+                Ok(None)
+            }
+            Err(err) => {
+                #[cfg(feature = "metrics")]
+                self.record_receive_error();
 
                 Err(err)
             }
@@ -267,6 +309,40 @@ mod tests {
         }
     }
 
+    fn assert_pktinfo_metadata(packet: &PacketWithMetadata, expected_destination: IpAddr) {
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "android",
+            target_vendor = "apple",
+            target_os = "freebsd",
+            target_os = "dragonfly",
+            target_os = "netbsd",
+            target_os = "openbsd"
+        ))]
+        {
+            assert_eq!(
+                packet.metadata.destination_local_ip,
+                Some(expected_destination)
+            );
+            assert!(packet.metadata.ingress_interface_index.is_some());
+        }
+
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "android",
+            target_vendor = "apple",
+            target_os = "freebsd",
+            target_os = "dragonfly",
+            target_os = "netbsd",
+            target_os = "openbsd"
+        )))]
+        {
+            let _ = expected_destination;
+            assert_eq!(packet.metadata.destination_local_ip, None);
+            assert_eq!(packet.metadata.ingress_interface_index, None);
+        }
+    }
+
     #[test]
     fn try_recv_returns_none_when_no_packet_is_available() {
         let config = sample_config(55020);
@@ -306,6 +382,47 @@ mod tests {
         assert_eq!(packet.dst_port, config.dst_port);
         assert_eq!(&packet.payload[..], payload);
         assert_eq!(packet.source.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+    }
+
+    #[test]
+    fn try_recv_with_metadata_exposes_current_socket_context() {
+        let config = sample_config(55029);
+        let socket = platform::open_bound_socket(&config).unwrap();
+        let mut subscription = Subscription::new(SubscriptionId(1), config.clone(), socket);
+        platform::join_multicast_group(subscription.socket(), subscription.config()).unwrap();
+        subscription.mark_joined().unwrap();
+
+        let sender = make_multicast_sender();
+        let payload = b"hello detailed receive";
+
+        sender
+            .send_to(payload, SocketAddrV4::new(config.group, config.dst_port))
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let packet = loop {
+            match subscription.try_recv_with_metadata().unwrap() {
+                Some(packet) => break packet,
+                None if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                None => panic!("timed out waiting for packet with metadata"),
+            }
+        };
+
+        assert_eq!(packet.packet.subscription_id, SubscriptionId(1));
+        assert_eq!(packet.packet.group, IpAddr::V4(config.group));
+        assert_eq!(packet.packet.dst_port, config.dst_port);
+        assert_eq!(&packet.packet.payload[..], payload);
+        assert_pktinfo_metadata(&packet, IpAddr::V4(config.group));
+        assert_eq!(
+            packet.metadata.socket_local_addr,
+            Some(SocketAddr::V4(SocketAddrV4::new(
+                Ipv4Addr::UNSPECIFIED,
+                config.dst_port,
+            )))
+        );
+        assert_eq!(packet.metadata.configured_interface, None);
     }
 
     #[test]
