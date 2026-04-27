@@ -23,6 +23,32 @@ fn resolve_interface(config: &SubscriptionConfig) -> Ipv4Addr {
     config.interface.unwrap_or(Ipv4Addr::UNSPECIFIED)
 }
 
+#[cfg(all(
+    unix,
+    not(any(
+        target_os = "solaris",
+        target_os = "illumos",
+        target_os = "cygwin",
+        target_os = "wasi"
+    ))
+))]
+fn set_port_reuse_if_supported(socket: &Socket) -> std::io::Result<()> {
+    socket.set_reuse_port(true)
+}
+
+#[cfg(not(all(
+    unix,
+    not(any(
+        target_os = "solaris",
+        target_os = "illumos",
+        target_os = "cygwin",
+        target_os = "wasi"
+    ))
+)))]
+fn set_port_reuse_if_supported(_socket: &Socket) -> std::io::Result<()> {
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DetailedReceiveMode {
     Basic,
@@ -694,6 +720,8 @@ pub(crate) fn open_bound_socket(config: &SubscriptionConfig) -> Result<ReceiveSo
         .set_reuse_address(true)
         .map_err(McrxError::SocketOptionFailed)?;
 
+    set_port_reuse_if_supported(&socket).map_err(McrxError::SocketOptionFailed)?;
+
     let bind_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, config.dst_port);
 
     socket
@@ -849,6 +877,27 @@ mod tests {
     use super::*;
     use crate::config::SubscriptionConfig;
     use std::net::Ipv4Addr;
+    use std::sync::atomic::{AtomicU16, Ordering};
+
+    static NEXT_TEST_PORT: AtomicU16 = AtomicU16::new(55100);
+
+    fn next_test_port() -> u16 {
+        NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn open_socket_on_available_test_port(group: Ipv4Addr) -> (SubscriptionConfig, ReceiveSocket) {
+        for _ in 0..128 {
+            let config = SubscriptionConfig::asm(group, next_test_port());
+
+            match open_bound_socket(&config) {
+                Ok(socket) => return (config, socket),
+                Err(McrxError::SocketBindFailed(_)) => continue,
+                Err(err) => panic!("failed to open first receive socket: {err:?}"),
+            }
+        }
+
+        panic!("failed to find an available UDP port for the receive socket test");
+    }
 
     #[test]
     fn open_and_join_socket_succeeds_for_valid_asm_config() {
@@ -897,5 +946,24 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    #[cfg(all(
+        unix,
+        not(any(
+            target_os = "solaris",
+            target_os = "illumos",
+            target_os = "cygwin",
+            target_os = "wasi"
+        ))
+    ))]
+    fn open_bound_socket_allows_two_receivers_on_same_port() {
+        let (config, first) = open_socket_on_available_test_port(Ipv4Addr::new(239, 1, 2, 3));
+
+        assert_eq!(first.local_addr().unwrap().port(), config.dst_port);
+
+        let second = open_bound_socket(&config);
+        assert!(second.is_ok(), "second receive socket bind should succeed");
     }
 }
