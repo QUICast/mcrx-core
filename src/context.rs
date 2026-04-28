@@ -20,6 +20,10 @@ use std::time::SystemTime;
 struct ContextMetricsInner {
     subscriptions_added: Cell<u64>,
     subscriptions_removed: Cell<u64>,
+    total_packets_received: Cell<u64>,
+    total_bytes_received: Cell<u64>,
+    total_would_block_count: Cell<u64>,
+    total_receive_errors: Cell<u64>,
     total_join_count: Cell<u64>,
     total_leave_count: Cell<u64>,
     batch_calls: Cell<u64>,
@@ -37,6 +41,30 @@ pub struct Context {
 }
 
 impl Context {
+    #[cfg(feature = "metrics")]
+    fn record_received_packet(&self, payload_len: usize) {
+        self.metrics
+            .total_packets_received
+            .set(self.metrics.total_packets_received.get() + 1);
+        self.metrics
+            .total_bytes_received
+            .set(self.metrics.total_bytes_received.get() + payload_len as u64);
+    }
+
+    #[cfg(feature = "metrics")]
+    fn record_would_block(&self) {
+        self.metrics
+            .total_would_block_count
+            .set(self.metrics.total_would_block_count.get() + 1);
+    }
+
+    #[cfg(feature = "metrics")]
+    fn record_receive_error(&self) {
+        self.metrics
+            .total_receive_errors
+            .set(self.metrics.total_receive_errors.get() + 1);
+    }
+
     fn ensure_subscription_config_is_unique(
         &self,
         config: &SubscriptionConfig,
@@ -105,21 +133,15 @@ impl Context {
     }
 
     /// Returns a snapshot of the context's current metrics.
-    /// total_packets_received and similar totals reflect currently active subscriptions only.
+    ///
+    /// Counter fields such as `total_packets_received` are cumulative for the
+    /// lifetime of the context and are not reduced when subscriptions are
+    /// removed.
     #[cfg(feature = "metrics")]
     pub fn metrics_snapshot(&self) -> ContextMetricsSnapshot {
-        let mut total_packets_received = 0u64;
-        let mut total_bytes_received = 0u64;
-        let mut total_would_block_count = 0u64;
-        let mut total_receive_errors = 0u64;
         let mut joined_subscriptions = 0usize;
 
         for subscription in &self.subscriptions {
-            let snapshot = subscription.metrics_snapshot();
-            total_packets_received += snapshot.packets_received;
-            total_bytes_received += snapshot.bytes_received;
-            total_would_block_count += snapshot.would_block_count;
-            total_receive_errors += snapshot.receive_errors;
             if subscription.is_joined() {
                 joined_subscriptions += 1;
             }
@@ -130,10 +152,10 @@ impl Context {
             subscriptions_removed: self.metrics.subscriptions_removed.get(),
             active_subscriptions: self.subscriptions.len(),
             joined_subscriptions,
-            total_packets_received,
-            total_bytes_received,
-            total_would_block_count,
-            total_receive_errors,
+            total_packets_received: self.metrics.total_packets_received.get(),
+            total_bytes_received: self.metrics.total_bytes_received.get(),
+            total_would_block_count: self.metrics.total_would_block_count.get(),
+            total_receive_errors: self.metrics.total_receive_errors.get(),
             total_join_count: self.metrics.total_join_count.get(),
             total_leave_count: self.metrics.total_leave_count.get(),
             batch_calls: self.metrics.batch_calls.get(),
@@ -252,6 +274,7 @@ impl Context {
     fn try_recv_from_joined<T>(
         &mut self,
         mut recv: impl FnMut(&Subscription) -> Result<Option<T>, McrxError>,
+        packet_len: impl Fn(&T) -> usize,
     ) -> Result<Option<T>, McrxError> {
         let subscription_count = self.subscriptions.len();
 
@@ -267,9 +290,25 @@ impl Context {
                 continue;
             }
 
-            if let Some(packet) = recv(subscription)? {
-                self.next_recv_index = (index + 1) % subscription_count;
-                return Ok(Some(packet));
+            match recv(subscription) {
+                Ok(Some(packet)) => {
+                    self.next_recv_index = (index + 1) % subscription_count;
+
+                    #[cfg(feature = "metrics")]
+                    self.record_received_packet(packet_len(&packet));
+
+                    return Ok(Some(packet));
+                }
+                Ok(None) => {
+                    #[cfg(feature = "metrics")]
+                    self.record_would_block();
+                }
+                Err(err) => {
+                    #[cfg(feature = "metrics")]
+                    self.record_receive_error();
+
+                    return Err(err);
+                }
             }
         }
 
@@ -315,7 +354,7 @@ impl Context {
     /// Returns the first available packet, if any joined subscription currently has
     /// one ready to be read.
     pub fn try_recv_any(&mut self) -> Result<Option<Packet>, McrxError> {
-        self.try_recv_from_joined(Subscription::try_recv)
+        self.try_recv_from_joined(Subscription::try_recv, |packet| packet.payload.len())
     }
 
     /// Attempts to receive a single packet with richer receive metadata from any
@@ -323,7 +362,9 @@ impl Context {
     ///
     /// This uses the same round-robin fairness logic as `try_recv_any()`.
     pub fn try_recv_any_with_metadata(&mut self) -> Result<Option<PacketWithMetadata>, McrxError> {
-        self.try_recv_from_joined(Subscription::try_recv_with_metadata)
+        self.try_recv_from_joined(Subscription::try_recv_with_metadata, |packet| {
+            packet.packet.payload.len()
+        })
     }
 
     /// Attempts to receive up to `max_packets` packets from any subscriptions without blocking.

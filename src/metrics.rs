@@ -596,7 +596,8 @@ fn read_macos_task_info() -> io::Result<ProcTaskInfo> {
 /// A point-in-time snapshot of cumulative context metrics.
 ///
 /// Counter fields in this snapshot are cumulative from the lifetime of the
-/// context and can be compared against an earlier snapshot to compute deltas
+/// context, including packets received by subscriptions that have since been
+/// removed, and can be compared against an earlier snapshot to compute deltas
 /// and rates.
 ///
 /// Gauge-like fields such as `active_subscriptions` and `joined_subscriptions`
@@ -1031,6 +1032,38 @@ mod tests {
         assert_eq!(subscription_metrics.last_payload_len, Some(payload.len()));
         assert!(subscription_metrics.last_source.is_some());
         assert!(subscription_metrics.last_receive_at.is_some());
+    }
+
+    #[test]
+    fn context_metrics_totals_survive_subscription_removal() {
+        let mut context = Context::new();
+        let config = sample_config(9019);
+        let id = context.add_subscription(config.clone()).unwrap();
+        context.join_subscription(id).unwrap();
+
+        let sender = make_multicast_sender();
+
+        let payload = b"lifetime-metrics";
+        sender
+            .send_to(payload, SocketAddrV4::new(config.group, config.dst_port))
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let packet = recv_next_packet(&mut context, deadline);
+        assert_eq!(&packet.payload[..], payload);
+
+        let before_removal = context.metrics_snapshot();
+        assert!(context.remove_subscription(id));
+
+        let after_removal = context.metrics_snapshot();
+
+        assert_eq!(before_removal.total_packets_received, 1);
+        assert_eq!(before_removal.total_bytes_received, payload.len() as u64);
+        assert_eq!(after_removal.total_packets_received, 1);
+        assert_eq!(after_removal.total_bytes_received, payload.len() as u64);
+        assert_eq!(after_removal.active_subscriptions, 0);
+        assert_eq!(after_removal.joined_subscriptions, 0);
+        assert_eq!(after_removal.subscriptions_removed, 1);
     }
 
     #[test]

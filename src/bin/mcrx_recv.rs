@@ -313,14 +313,22 @@ fn write_metrics_summary_jsonl(
             "\"interval_secs\":{},",
             "\"active_subscriptions\":{},",
             "\"joined_subscriptions\":{},",
-            "\"packets_received\":{},",
-            "\"bytes_received\":{},",
-            "\"would_block_count\":{},",
-            "\"receive_errors\":{},",
-            "\"join_count\":{},",
-            "\"leave_count\":{},",
-            "\"batch_calls\":{},",
-            "\"batch_packets_received\":{},",
+            "\"packets_received_total\":{},",
+            "\"bytes_received_total\":{},",
+            "\"packets_received_delta\":{},",
+            "\"bytes_received_delta\":{},",
+            "\"would_block_count_total\":{},",
+            "\"would_block_count_delta\":{},",
+            "\"receive_errors_total\":{},",
+            "\"receive_errors_delta\":{},",
+            "\"join_count_total\":{},",
+            "\"join_count_delta\":{},",
+            "\"leave_count_total\":{},",
+            "\"leave_count_delta\":{},",
+            "\"batch_calls_total\":{},",
+            "\"batch_calls_delta\":{},",
+            "\"batch_packets_received_total\":{},",
+            "\"batch_packets_received_delta\":{},",
             "\"packets_per_sec\":{},",
             "\"bytes_per_sec\":{},",
             "\"would_block_per_sec\":{},",
@@ -331,13 +339,21 @@ fn write_metrics_summary_jsonl(
         delta.interval_secs,
         snapshot.active_subscriptions,
         snapshot.joined_subscriptions,
+        snapshot.total_packets_received,
+        snapshot.total_bytes_received,
         delta.packets_received,
         delta.bytes_received,
+        snapshot.total_would_block_count,
         delta.would_block_count,
+        snapshot.total_receive_errors,
         delta.receive_errors,
+        snapshot.total_join_count,
         delta.join_count,
+        snapshot.total_leave_count,
         delta.leave_count,
+        snapshot.batch_calls,
         delta.batch_calls,
+        snapshot.batch_packets_received,
         delta.batch_packets_received,
         delta.packets_per_sec(),
         delta.bytes_per_sec(),
@@ -417,14 +433,40 @@ fn print_metrics_summary(snapshot: &ContextMetricsSnapshot, delta: &ContextMetri
     println!("  interval_secs:         {:.3}", delta.interval_secs);
     println!("  active_subscriptions:  {}", snapshot.active_subscriptions);
     println!("  joined_subscriptions:  {}", snapshot.joined_subscriptions);
-    println!("  packets_received:      {}", delta.packets_received);
-    println!("  bytes_received:        {}", delta.bytes_received);
-    println!("  would_block_count:     {}", delta.would_block_count);
-    println!("  receive_errors:        {}", delta.receive_errors);
-    println!("  join_count:            {}", delta.join_count);
-    println!("  leave_count:           {}", delta.leave_count);
-    println!("  batch_calls:           {}", delta.batch_calls);
-    println!("  batch_packets:         {}", delta.batch_packets_received);
+    println!(
+        "  packets_received_total: {}",
+        snapshot.total_packets_received
+    );
+    println!("  packets_received_delta: {}", delta.packets_received);
+    println!(
+        "  bytes_received_total:   {}",
+        snapshot.total_bytes_received
+    );
+    println!("  bytes_received_delta:   {}", delta.bytes_received);
+    println!(
+        "  would_block_count_total: {}",
+        snapshot.total_would_block_count
+    );
+    println!("  would_block_count_delta: {}", delta.would_block_count);
+    println!(
+        "  receive_errors_total:   {}",
+        snapshot.total_receive_errors
+    );
+    println!("  receive_errors_delta:   {}", delta.receive_errors);
+    println!("  join_count_total:       {}", snapshot.total_join_count);
+    println!("  join_count_delta:       {}", delta.join_count);
+    println!("  leave_count_total:      {}", snapshot.total_leave_count);
+    println!("  leave_count_delta:      {}", delta.leave_count);
+    println!("  batch_calls_total:      {}", snapshot.batch_calls);
+    println!("  batch_calls_delta:      {}", delta.batch_calls);
+    println!(
+        "  batch_packets_received_total: {}",
+        snapshot.batch_packets_received
+    );
+    println!(
+        "  batch_packets_received_delta: {}",
+        delta.batch_packets_received
+    );
     println!("  packets_per_sec:       {:.3}", delta.packets_per_sec());
     println!("  bytes_per_sec:         {:.3}", delta.bytes_per_sec());
     println!(
@@ -491,9 +533,90 @@ fn print_usage(program: &str) {
         eprintln!("  MCRX_METRICS_SUMMARY_SECS=<n>   emit a delta metrics summary every n seconds");
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         eprintln!(
-            "  MCRX_METRICS_SUMMARY_FILE=<p>   write network metrics to <p> and hardware metrics to a sibling *_hardware file"
+            "  MCRX_METRICS_SUMMARY_FILE=<p>   write network metrics with explicit *_total and *_delta fields to <p> and hardware metrics to a sibling *_hardware file"
         );
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        eprintln!("  MCRX_METRICS_SUMMARY_FILE=<p>   write network metrics to <p>");
+        eprintln!(
+            "  MCRX_METRICS_SUMMARY_FILE=<p>   write network metrics with explicit *_total and *_delta fields to <p>"
+        );
+    }
+}
+
+#[cfg(all(test, feature = "metrics"))]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::time::{Duration, SystemTime};
+
+    fn unique_temp_path(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO)
+            .as_nanos();
+        std::env::temp_dir().join(format!("mcrx_recv_{name}_{unique}.jsonl"))
+    }
+
+    #[test]
+    fn metrics_jsonl_uses_explicit_total_and_delta_field_names() {
+        let path = unique_temp_path("metrics_schema");
+
+        let snapshot = ContextMetricsSnapshot {
+            subscriptions_added: 1,
+            subscriptions_removed: 0,
+            active_subscriptions: 1,
+            joined_subscriptions: 1,
+            total_packets_received: 10,
+            total_bytes_received: 1000,
+            total_would_block_count: 4,
+            total_receive_errors: 2,
+            total_join_count: 3,
+            total_leave_count: 1,
+            batch_calls: 7,
+            batch_packets_received: 10,
+            captured_at: SystemTime::UNIX_EPOCH + Duration::from_secs(123),
+        };
+
+        let delta = ContextMetricsDelta {
+            interval_secs: 2.0,
+            packets_received: 5,
+            bytes_received: 600,
+            would_block_count: 1,
+            receive_errors: 1,
+            join_count: 1,
+            leave_count: 0,
+            batch_calls: 2,
+            batch_packets_received: 5,
+        };
+
+        write_metrics_summary_jsonl(&snapshot, &delta, &path).unwrap();
+
+        let line = fs::read_to_string(&path).unwrap();
+
+        assert!(line.contains("\"packets_received_total\":10"));
+        assert!(line.contains("\"bytes_received_total\":1000"));
+        assert!(line.contains("\"packets_received_delta\":5"));
+        assert!(line.contains("\"bytes_received_delta\":600"));
+        assert!(line.contains("\"would_block_count_total\":4"));
+        assert!(line.contains("\"would_block_count_delta\":1"));
+        assert!(line.contains("\"receive_errors_total\":2"));
+        assert!(line.contains("\"receive_errors_delta\":1"));
+        assert!(line.contains("\"join_count_total\":3"));
+        assert!(line.contains("\"join_count_delta\":1"));
+        assert!(line.contains("\"leave_count_total\":1"));
+        assert!(line.contains("\"leave_count_delta\":0"));
+        assert!(line.contains("\"batch_calls_total\":7"));
+        assert!(line.contains("\"batch_calls_delta\":2"));
+        assert!(line.contains("\"batch_packets_received_total\":10"));
+        assert!(line.contains("\"batch_packets_received_delta\":5"));
+        assert!(!line.contains("\"packets_received\":"));
+        assert!(!line.contains("\"bytes_received\":"));
+        assert!(!line.contains("\"would_block_count\":"));
+        assert!(!line.contains("\"receive_errors\":"));
+        assert!(!line.contains("\"join_count\":"));
+        assert!(!line.contains("\"leave_count\":"));
+        assert!(!line.contains("\"batch_calls\":"));
+        assert!(!line.contains("\"batch_packets_received\":"));
+
+        let _ = fs::remove_file(path);
     }
 }
