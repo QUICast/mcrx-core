@@ -89,12 +89,7 @@ fn run() -> Result<(), String> {
     #[cfg(feature = "metrics")]
     let _ = metrics_sampler.sample(ctx.metrics_snapshot());
     #[cfg(feature = "metrics")]
-    let mut hardware_metrics_sampler = HardwareMetricsSampler::new();
-    #[cfg(feature = "metrics")]
-    let _ = hardware_metrics_sampler.sample(
-        HardwareMetricsSnapshot::capture_current_process()
-            .map_err(|err| format!("failed to capture initial hardware metrics: {err}"))?,
-    );
+    let mut hardware_metrics_sampler = init_hardware_metrics_sampler()?;
     #[cfg(feature = "metrics")]
     let mut next_summary_at = summary_interval.map(|interval| Instant::now() + interval);
 
@@ -124,8 +119,6 @@ fn run() -> Result<(), String> {
             && Instant::now() >= deadline
         {
             let snapshot = ctx.metrics_snapshot();
-            let hardware_snapshot = HardwareMetricsSnapshot::capture_current_process()
-                .map_err(|err| format!("failed to capture hardware metrics: {err}"))?;
 
             if let Some(delta) = metrics_sampler.sample(snapshot.clone()) {
                 if let Some(path) = &summary_file {
@@ -136,14 +129,18 @@ fn run() -> Result<(), String> {
                 }
             }
 
-            if let Some(delta) = hardware_metrics_sampler.sample(hardware_snapshot.clone()) {
-                if let Some(path) = &summary_file {
-                    write_hardware_metrics_summary_jsonl(&hardware_snapshot, &delta, path)
-                        .map_err(|err| {
-                            format!("failed to write hardware metrics summary: {err}")
-                        })?;
-                } else {
-                    print_hardware_metrics_summary(&hardware_snapshot, &delta);
+            if let Some(hardware_sampler) = hardware_metrics_sampler.as_mut()
+                && let Some(hardware_snapshot) = capture_hardware_metrics_snapshot()?
+            {
+                if let Some(delta) = hardware_sampler.sample(hardware_snapshot.clone()) {
+                    if let Some(path) = &summary_file {
+                        write_hardware_metrics_summary_jsonl(&hardware_snapshot, &delta, path)
+                            .map_err(|err| {
+                                format!("failed to write hardware metrics summary: {err}")
+                            })?;
+                    } else {
+                        print_hardware_metrics_summary(&hardware_snapshot, &delta);
+                    }
                 }
             }
 
@@ -232,6 +229,39 @@ fn summary_file_from_env() -> Option<PathBuf> {
         None
     } else {
         Some(PathBuf::from(raw))
+    }
+}
+
+#[cfg(feature = "metrics")]
+fn init_hardware_metrics_sampler() -> Result<Option<HardwareMetricsSampler>, String> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let mut sampler = HardwareMetricsSampler::new();
+        let _ = sampler.sample(
+            HardwareMetricsSnapshot::capture_current_process()
+                .map_err(|err| format!("failed to capture initial hardware metrics: {err}"))?,
+        );
+        Ok(Some(sampler))
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        Ok(None)
+    }
+}
+
+#[cfg(feature = "metrics")]
+fn capture_hardware_metrics_snapshot() -> Result<Option<HardwareMetricsSnapshot>, String> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        HardwareMetricsSnapshot::capture_current_process()
+            .map(Some)
+            .map_err(|err| format!("failed to capture hardware metrics: {err}"))
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        Ok(None)
     }
 }
 
@@ -459,8 +489,11 @@ fn print_usage(program: &str) {
         eprintln!();
         eprintln!("Metrics (when built with --features metrics):");
         eprintln!("  MCRX_METRICS_SUMMARY_SECS=<n>   emit a delta metrics summary every n seconds");
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         eprintln!(
             "  MCRX_METRICS_SUMMARY_FILE=<p>   write network metrics to <p> and hardware metrics to a sibling *_hardware file"
         );
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        eprintln!("  MCRX_METRICS_SUMMARY_FILE=<p>   write network metrics to <p>");
     }
 }

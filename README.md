@@ -103,9 +103,12 @@ await packets asynchronously:
 use mcrx_core::TokioSubscription;
 
 let subscription = ctx.take_subscription(id).unwrap();
-let subscription = TokioSubscription::new(subscription) ?;
+let mut subscription = TokioSubscription::new(subscription) ?;
 let packet = subscription.recv().await?;
 ```
+
+`TokioSubscription` is an owned single-consumer receive handle, so its async
+receive methods take `&mut self`.
 
 Run the Tokio example with:
 

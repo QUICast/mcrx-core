@@ -126,11 +126,14 @@ The library also exposes `TokioSubscription`:
 use mcrx_core::TokioSubscription;
 
 let subscription = ctx.take_subscription(id).unwrap();
-let subscription = TokioSubscription::new(subscription)?;
+let mut subscription = TokioSubscription::new(subscription)?;
 
 let packet = subscription.recv().await?;
 let detailed = subscription.recv_with_metadata().await?;
 ```
+
+`TokioSubscription` is an owned single-consumer receive handle, so its async
+receive methods take `&mut self`.
 
 On Unix this waits for socket readiness via Tokio's `AsyncFd`. On other
 platforms it currently falls back to an async sleep-and-poll loop around the

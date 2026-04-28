@@ -56,7 +56,7 @@ async fn run() -> Result<(), String> {
     let subscription = ctx
         .take_subscription(subscription_id)
         .ok_or_else(|| "failed to extract subscription from context".to_string())?;
-    let subscription = TokioSubscription::new(subscription)
+    let mut subscription = TokioSubscription::new(subscription)
         .map_err(|err| format!("failed to create tokio adapter: {err}"))?;
 
     println!("mcrx-tokio-recv ready");

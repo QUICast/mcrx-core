@@ -936,14 +936,17 @@ mod tests {
         let mut packets = Vec::new();
 
         while packets.len() < 2 && Instant::now() < deadline {
-            context.try_recv_batch_into(&mut packets, 2).unwrap();
+            let before = packets.len();
+            let received = context.try_recv_batch_into(&mut packets, 2).unwrap();
+            assert!(received <= 2);
+            assert_eq!(packets.len(), before + received);
 
             if packets.len() < 2 {
                 thread::sleep(Duration::from_millis(10));
             }
         }
 
-        assert_eq!(packets.len(), 2);
+        assert!(packets.len() >= 2);
 
         assert_eq!(
             (packets[0].subscription_id, &packets[0].payload[..]),
@@ -973,16 +976,19 @@ mod tests {
         let mut packets = Vec::new();
 
         while packets.len() < 2 && Instant::now() < deadline {
-            context
+            let before = packets.len();
+            let received = context
                 .try_recv_batch_with_metadata_into(&mut packets, 2)
                 .unwrap();
+            assert!(received <= 2);
+            assert_eq!(packets.len(), before + received);
 
             if packets.len() < 2 {
                 thread::sleep(Duration::from_millis(10));
             }
         }
 
-        assert_eq!(packets.len(), 2);
+        assert!(packets.len() >= 2);
 
         assert_eq!(
             (

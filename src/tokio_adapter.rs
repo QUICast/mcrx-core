@@ -20,6 +20,10 @@ pub enum TokioReceiveError {
 ///
 /// On Unix this uses `tokio::io::unix::AsyncFd` to wait for read readiness.
 /// On other platforms it falls back to an async sleep-and-poll loop.
+///
+/// The async receive methods take `&mut self` because the adapter is designed
+/// for a single receiving task at a time. This also keeps the Tokio receive
+/// future `Send` when the optional `metrics` feature is enabled.
 #[derive(Debug)]
 pub struct TokioSubscription {
     #[cfg(unix)]
@@ -83,17 +87,17 @@ impl TokioSubscription {
     }
 
     /// Waits for the next packet and returns it.
-    pub async fn recv(&self) -> Result<Packet, TokioReceiveError> {
+    pub async fn recv(&mut self) -> Result<Packet, TokioReceiveError> {
         #[cfg(unix)]
         {
             loop {
                 let mut readiness = self
                     .inner
-                    .readable()
+                    .readable_mut()
                     .await
                     .map_err(TokioReceiveError::Readiness)?;
 
-                match self.inner.get_ref().try_recv()? {
+                match readiness.get_inner_mut().try_recv()? {
                     Some(packet) => return Ok(packet),
                     None => readiness.clear_ready(),
                 }
@@ -112,17 +116,17 @@ impl TokioSubscription {
     }
 
     /// Waits for the next packet with richer receive metadata and returns it.
-    pub async fn recv_with_metadata(&self) -> Result<PacketWithMetadata, TokioReceiveError> {
+    pub async fn recv_with_metadata(&mut self) -> Result<PacketWithMetadata, TokioReceiveError> {
         #[cfg(unix)]
         {
             loop {
                 let mut readiness = self
                     .inner
-                    .readable()
+                    .readable_mut()
                     .await
                     .map_err(TokioReceiveError::Readiness)?;
 
-                match self.inner.get_ref().try_recv_with_metadata()? {
+                match readiness.get_inner_mut().try_recv_with_metadata()? {
                     Some(packet) => return Ok(packet),
                     None => readiness.clear_ready(),
                 }
@@ -164,7 +168,7 @@ mod tests {
         context.join_subscription(id).unwrap();
 
         let subscription = context.take_subscription(id).unwrap();
-        let subscription = TokioSubscription::new(subscription).unwrap();
+        let mut subscription = TokioSubscription::new(subscription).unwrap();
 
         let sender = make_multicast_sender();
         let payload = b"tokio adapter packet";
@@ -179,5 +183,40 @@ mod tests {
 
         assert_eq!(packet.packet.subscription_id, id);
         assert_eq!(&packet.packet.payload[..], payload);
+    }
+
+    #[cfg(feature = "metrics")]
+    #[tokio::test]
+    async fn tokio_subscription_with_metrics_is_spawn_safe() {
+        let mut context = Context::new();
+        let config = sample_config(55111);
+        let id = context.add_subscription(config.clone()).unwrap();
+        context.join_subscription(id).unwrap();
+
+        let subscription = context.take_subscription(id).unwrap();
+        let sender = make_multicast_sender();
+        let payload = b"tokio metrics packet";
+
+        let handle = tokio::spawn(async move {
+            let mut subscription = TokioSubscription::new(subscription).unwrap();
+            let packet = timeout(Duration::from_secs(1), subscription.recv_with_metadata())
+                .await
+                .expect("timed out waiting for spawned tokio packet")
+                .unwrap();
+            let metrics = subscription.subscription().metrics_snapshot();
+            (packet, metrics)
+        });
+
+        sender
+            .send_to(payload, SocketAddrV4::new(config.group, config.dst_port))
+            .unwrap();
+
+        let (packet, metrics) = handle.await.unwrap();
+
+        assert_eq!(packet.packet.subscription_id, id);
+        assert_eq!(&packet.packet.payload[..], payload);
+        assert_eq!(metrics.packets_received, 1);
+        assert_eq!(metrics.bytes_received, payload.len() as u64);
+        assert_eq!(metrics.last_payload_len, Some(payload.len()));
     }
 }
