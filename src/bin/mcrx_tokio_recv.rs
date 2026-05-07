@@ -1,3 +1,6 @@
+#[path = "common/recv_args.rs"]
+mod recv_args;
+
 use mcrx_core::{Context, SubscriptionConfig, TokioSubscription};
 use std::env;
 use std::net::IpAddr;
@@ -16,29 +19,22 @@ async fn main() {
 async fn run() -> Result<(), String> {
     let args: Vec<String> = env::args().collect();
 
-    if args.len() < 3 || args.len() > 5 {
+    if args.len() < 3 {
         print_usage(&args[0]);
         return Err("invalid arguments".to_string());
     }
 
-    let group = parse_ip("group", &args[1])?;
-    let dst_port = parse_port(&args[2])?;
-
-    let source = if args.len() >= 4 {
-        Some(parse_ip("source", &args[3])?)
-    } else {
-        None
+    let parsed = match recv_args::parse_receive_cli_args(&args) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            print_usage(&args[0]);
+            return Err(err);
+        }
     };
-
-    let interface = if args.len() >= 5 {
-        Some(parse_ip("interface", &args[4])?)
-    } else {
-        None
-    };
-
-    if !group.is_multicast() {
-        return Err(format!("group address {group} is not multicast"));
-    }
+    let group = parsed.group;
+    let dst_port = parsed.dst_port;
+    let source = parsed.source;
+    let interface = parsed.interface;
 
     let mut config = match source {
         Some(source) => SubscriptionConfig::ssm_ip(group, source, dst_port),
@@ -98,24 +94,6 @@ async fn run() -> Result<(), String> {
     }
 }
 
-fn parse_ip(name: &str, value: &str) -> Result<IpAddr, String> {
-    value
-        .parse::<IpAddr>()
-        .map_err(|err| format!("invalid {name} '{value}': {err}"))
-}
-
-fn parse_port(value: &str) -> Result<u16, String> {
-    let port = value
-        .parse::<u16>()
-        .map_err(|err| format!("invalid dst_port '{value}': {err}"))?;
-
-    if port == 0 {
-        return Err("dst_port must not be 0".to_string());
-    }
-
-    Ok(port)
-}
-
 fn source_string(source: Option<IpAddr>) -> String {
     match source {
         Some(source) => source.to_string(),
@@ -162,8 +140,11 @@ fn truncate_preview(text: &str, max_len: usize) -> String {
 
 fn print_usage(program: &str) {
     eprintln!("usage: {program} <group> <dst_port> [source] [interface]");
+    eprintln!("       {program} <group> <dst_port> [--source <source>] [--interface <interface>]");
     eprintln!("  group      multicast group, e.g. 239.1.2.3 or ff01::1234");
     eprintln!("  dst_port   destination UDP port");
     eprintln!("  source     optional source for SSM");
     eprintln!("  interface  optional local interface address");
+    eprintln!("examples:");
+    eprintln!("  {program} ff01::1234 5000 --interface ::1");
 }

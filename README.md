@@ -140,6 +140,7 @@ Basic receiver:
 
 ```bash
 cargo run --bin mcrx_recv -- 239.1.2.3 5000
+cargo run --bin mcrx_recv -- ff01::1234 5000 --interface ::1
 ```
 
 Sender:
@@ -159,6 +160,7 @@ Metadata inspection receiver:
 
 ```bash
 cargo run --bin mcrx_recv_meta -- 239.1.2.3 5000
+cargo run --bin mcrx_recv_meta -- ff01::1234 5000 --interface ::1
 ```
 
 ## Documentation

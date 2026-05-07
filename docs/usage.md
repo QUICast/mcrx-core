@@ -26,6 +26,9 @@ let mut config = SubscriptionConfig::asm(group, port);
 config.interface = Some(interface.into());
 ```
 
+The demo receiver binaries also support an explicit ASM interface override via
+`--interface`, for example `mcrx_recv_meta ff01::1234 5000 --interface ::1`.
+
 `SubscriptionConfig` can represent either IPv4 or IPv6 addresses. The active
 receive path supports IPv4 ASM/SSM and IPv6 ASM today. The metadata-aware
 receive APIs also expose pktinfo-style metadata for both families on platforms
