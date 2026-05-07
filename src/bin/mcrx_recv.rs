@@ -9,7 +9,7 @@ use std::env;
 use std::fs::OpenOptions;
 #[cfg(feature = "metrics")]
 use std::io::Write;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 #[cfg(feature = "metrics")]
 use std::path::PathBuf;
 use std::process;
@@ -61,7 +61,7 @@ fn run() -> Result<(), String> {
         Some(source) => SubscriptionConfig::ssm(group, source, dst_port),
         None => SubscriptionConfig::asm(group, dst_port),
     };
-    config.interface = interface;
+    config.interface = interface.map(IpAddr::V4);
 
     let mut ctx = Context::new();
     let subscription_id = ctx

@@ -6,6 +6,9 @@
 It is built for applications and integrations that want a small multicast
 receive core with explicit lifecycle and socket ownership control.
 
+The configuration model is now family-aware in preparation for IPv6 work, but
+active receive support is still IPv4-only today.
+
 ## Highlights
 
 - IPv4 ASM and SSM receive support

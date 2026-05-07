@@ -23,8 +23,11 @@ If needed, set the local interface explicitly:
 
 ```rust
 let mut config = SubscriptionConfig::asm(group, port);
-config.interface = Some(interface);
+config.interface = Some(interface.into());
 ```
+
+`SubscriptionConfig` can now represent either IPv4 or IPv6 addresses, but the
+active receive path remains IPv4-only until the socket layer grows IPv6 support.
 
 ## Existing Sockets
 

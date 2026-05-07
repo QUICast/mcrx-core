@@ -11,7 +11,7 @@ mod test_support;
 #[cfg(feature = "tokio")]
 pub mod tokio_adapter;
 
-pub use config::{SourceFilter, SubscriptionConfig};
+pub use config::{SourceFilter, SubscriptionAddressFamily, SubscriptionConfig};
 pub use context::Context;
 pub use error::McrxError;
 pub use packet::{Packet, PacketWithMetadata, ReceiveMetadata};

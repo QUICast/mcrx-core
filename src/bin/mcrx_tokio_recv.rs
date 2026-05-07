@@ -1,6 +1,6 @@
 use mcrx_core::{Context, SubscriptionConfig, TokioSubscription};
 use std::env;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::process;
 
 const MAX_PREVIEW_LEN: usize = 64;
@@ -44,7 +44,7 @@ async fn run() -> Result<(), String> {
         Some(source) => SubscriptionConfig::ssm(group, source, dst_port),
         None => SubscriptionConfig::asm(group, dst_port),
     };
-    config.interface = interface;
+    config.interface = interface.map(IpAddr::V4);
 
     let mut ctx = Context::new();
     let subscription_id = ctx

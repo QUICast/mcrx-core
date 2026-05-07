@@ -369,11 +369,19 @@ mod tests {
 
     fn test_ssm_config(port: u16, interface: Ipv4Addr) -> SubscriptionConfig {
         SubscriptionConfig {
-            group: Ipv4Addr::new(232, 1, 2, 3),
-            source: SourceFilter::Source(interface),
+            group: IpAddr::V4(Ipv4Addr::new(232, 1, 2, 3)),
+            source: SourceFilter::Source(IpAddr::V4(interface)),
             dst_port: port,
-            interface: Some(interface),
+            interface: Some(IpAddr::V4(interface)),
         }
+    }
+
+    fn ipv4_group(config: &SubscriptionConfig) -> Ipv4Addr {
+        config.ipv4_membership().unwrap().group
+    }
+
+    fn ipv4_group_socket_addr(config: &SubscriptionConfig) -> SocketAddrV4 {
+        SocketAddrV4::new(ipv4_group(config), config.dst_port)
     }
 
     fn primary_ipv4() -> Ipv4Addr {
@@ -472,7 +480,7 @@ mod tests {
         let packet = recv_next_subscription_packet(&subscription, deadline);
 
         assert_eq!(packet.subscription_id, SubscriptionId(1));
-        assert_eq!(packet.group, IpAddr::V4(config.group));
+        assert_eq!(packet.group, IpAddr::V4(ipv4_group(&config)));
         assert_eq!(packet.dst_port, config.dst_port);
         assert_eq!(&packet.payload[..], payload);
         assert_eq!(packet.source.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
@@ -491,7 +499,7 @@ mod tests {
         let payload = b"hello detailed receive";
 
         sender
-            .send_to(payload, SocketAddrV4::new(config.group, config.dst_port))
+            .send_to(payload, ipv4_group_socket_addr(&config))
             .unwrap();
 
         let deadline = Instant::now() + Duration::from_secs(1);
@@ -506,10 +514,10 @@ mod tests {
         };
 
         assert_eq!(packet.packet.subscription_id, SubscriptionId(1));
-        assert_eq!(packet.packet.group, IpAddr::V4(config.group));
+        assert_eq!(packet.packet.group, IpAddr::V4(ipv4_group(&config)));
         assert_eq!(packet.packet.dst_port, config.dst_port);
         assert_eq!(&packet.packet.payload[..], payload);
-        assert_pktinfo_metadata(&packet, IpAddr::V4(config.group));
+        assert_pktinfo_metadata(&packet, IpAddr::V4(ipv4_group(&config)));
         assert_eq!(
             packet.metadata.socket_local_addr,
             Some(SocketAddr::V4(SocketAddrV4::new(
@@ -535,14 +543,14 @@ mod tests {
         let payload = b"hello real asm multicast";
 
         sender
-            .send_to(payload, SocketAddrV4::new(config.group, config.dst_port))
+            .send_to(payload, ipv4_group_socket_addr(&config))
             .unwrap();
 
         let deadline = Instant::now() + Duration::from_secs(1);
         let packet = recv_next_subscription_packet(&subscription, deadline);
 
         assert_eq!(packet.subscription_id, SubscriptionId(1));
-        assert_eq!(packet.group, IpAddr::V4(config.group));
+        assert_eq!(packet.group, IpAddr::V4(ipv4_group(&config)));
         assert_eq!(packet.dst_port, config.dst_port);
         assert_eq!(&packet.payload[..], payload);
         assert_eq!(packet.source.port(), sender_port);
@@ -566,14 +574,14 @@ mod tests {
         let payload = b"hello real ssm multicast";
 
         sender
-            .send_to(payload, SocketAddrV4::new(config.group, config.dst_port))
+            .send_to(payload, ipv4_group_socket_addr(&config))
             .unwrap();
 
         let deadline = Instant::now() + Duration::from_secs(1);
         let packet = recv_next_subscription_packet(&subscription, deadline);
 
         assert_eq!(packet.subscription_id, SubscriptionId(1));
-        assert_eq!(packet.group, IpAddr::V4(config.group));
+        assert_eq!(packet.group, IpAddr::V4(ipv4_group(&config)));
         assert_eq!(packet.dst_port, config.dst_port);
         assert_eq!(&packet.payload[..], payload);
         assert_eq!(packet.source.port(), sender_port);

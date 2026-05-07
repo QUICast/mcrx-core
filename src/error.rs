@@ -8,13 +8,21 @@ pub enum McrxError {
     #[error("MCRX: invalid destination port")]
     InvalidDestinationPort,
 
-    /// The configured group address is not a valid multicast IPv4 address.
-    #[error("MCRX: group must be a multicast IPv4 address")]
+    /// The configured group address is not a valid multicast IP address.
+    #[error("MCRX: group must be a multicast IP address")]
     InvalidMulticastGroup,
 
     /// The configured SSM source address is invalid.
     #[error("MCRX: invalid source address")]
     InvalidSourceAddress,
+
+    /// The configured SSM source address family does not match the group family.
+    #[error("MCRX: source address family must match group address family")]
+    SourceAddressFamilyMismatch,
+
+    /// The configured interface address family does not match the group family.
+    #[error("MCRX: interface address family must match group address family")]
+    InterfaceAddressFamilyMismatch,
 
     /// A subscription with the same configuration already exists.
     #[error("MCRX: subscription already exists")]
@@ -44,6 +52,10 @@ pub enum McrxError {
     #[error("MCRX: failed to bind UDP socket: {0}")]
     SocketBindFailed(io::Error),
 
+    /// IPv6 subscription support has not been wired into the socket layer yet.
+    #[error("MCRX: IPv6 subscription support is not implemented yet")]
+    Ipv6NotYetImplemented,
+
     /// Reading the local address of an existing socket failed.
     #[error("MCRX: failed to read local address from existing socket: {0}")]
     SocketLocalAddrFailed(io::Error),
@@ -60,11 +72,11 @@ pub enum McrxError {
     #[error("MCRX: existing socket is bound to UDP port {actual}, expected {expected}")]
     ExistingSocketPortMismatch { expected: u16, actual: u16 },
 
-    /// Joining an IPv4 multicast group failed.
-    #[error("MCRX: failed to join IPv4 multicast group: {0}")]
+    /// Joining a multicast group failed.
+    #[error("MCRX: failed to join multicast group: {0}")]
     MulticastJoinFailed(io::Error),
 
-    /// Leaving an IPv4 multicast group failed.
+    /// Leaving a multicast group failed.
     #[error("MCRX: failed to leave multicast group: {0}")]
     MulticastLeaveFailed(io::Error),
 

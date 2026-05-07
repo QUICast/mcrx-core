@@ -156,6 +156,10 @@ mod tests {
         SubscriptionConfig::asm(Ipv4Addr::new(239, 1, 2, 3), port)
     }
 
+    fn ipv4_group(config: &SubscriptionConfig) -> Ipv4Addr {
+        config.ipv4_membership().unwrap().group
+    }
+
     fn make_multicast_sender() -> std::net::UdpSocket {
         std::net::UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)).unwrap()
     }
@@ -173,7 +177,7 @@ mod tests {
         let sender = make_multicast_sender();
         let payload = b"tokio adapter packet";
         sender
-            .send_to(payload, SocketAddrV4::new(config.group, config.dst_port))
+            .send_to(payload, SocketAddrV4::new(ipv4_group(&config), config.dst_port))
             .unwrap();
 
         let packet = timeout(Duration::from_secs(1), subscription.recv_with_metadata())
@@ -208,7 +212,7 @@ mod tests {
         });
 
         sender
-            .send_to(payload, SocketAddrV4::new(config.group, config.dst_port))
+            .send_to(payload, SocketAddrV4::new(ipv4_group(&config), config.dst_port))
             .unwrap();
 
         let (packet, metrics) = handle.await.unwrap();

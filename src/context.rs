@@ -274,7 +274,7 @@ impl Context {
     fn try_recv_from_joined<T>(
         &mut self,
         mut recv: impl FnMut(&Subscription) -> Result<Option<T>, McrxError>,
-        packet_len: impl Fn(&T) -> usize,
+        _packet_len: impl Fn(&T) -> usize,
     ) -> Result<Option<T>, McrxError> {
         let subscription_count = self.subscriptions.len();
 
@@ -295,7 +295,7 @@ impl Context {
                     self.next_recv_index = (index + 1) % subscription_count;
 
                     #[cfg(feature = "metrics")]
-                    self.record_received_packet(packet_len(&packet));
+                    self.record_received_packet(_packet_len(&packet));
 
                     return Ok(Some(packet));
                 }
@@ -508,6 +508,14 @@ mod tests {
         socket
     }
 
+    fn ipv4_group(config: &SubscriptionConfig) -> Ipv4Addr {
+        config.ipv4_membership().unwrap().group
+    }
+
+    fn ipv4_group_socket_addr(config: &SubscriptionConfig) -> SocketAddrV4 {
+        SocketAddrV4::new(ipv4_group(config), config.dst_port)
+    }
+
     fn assert_pktinfo_metadata(
         packet: &PacketWithMetadata,
         expected_destination: std::net::IpAddr,
@@ -556,19 +564,19 @@ mod tests {
         sender
             .send_to(
                 b"first-1",
-                SocketAddrV4::new(first_config.group, first_config.dst_port),
+                ipv4_group_socket_addr(first_config),
             )
             .unwrap();
         sender
             .send_to(
                 b"second-1",
-                SocketAddrV4::new(second_config.group, second_config.dst_port),
+                ipv4_group_socket_addr(second_config),
             )
             .unwrap();
         sender
             .send_to(
                 b"first-2",
-                SocketAddrV4::new(first_config.group, first_config.dst_port),
+                ipv4_group_socket_addr(first_config),
             )
             .unwrap();
     }
@@ -609,7 +617,7 @@ mod tests {
         let mut context = Context::new();
 
         let invalid_config = SubscriptionConfig {
-            group: Ipv4Addr::new(192, 168, 1, 10),
+            group: std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)),
             source: SourceFilter::Any,
             dst_port: 5000,
             interface: None,
@@ -618,6 +626,17 @@ mod tests {
         let result = context.add_subscription(invalid_config);
 
         assert!(matches!(result, Err(McrxError::InvalidMulticastGroup)));
+        assert_eq!(context.subscription_count(), 0);
+    }
+
+    #[test]
+    fn ipv6_subscription_is_rejected_until_socket_support_is_implemented() {
+        let mut context = Context::new();
+        let config = SubscriptionConfig::asm_v6("ff3e::1234".parse().unwrap(), 5000);
+
+        let result = context.add_subscription(config);
+
+        assert!(matches!(result, Err(McrxError::Ipv6NotYetImplemented)));
         assert_eq!(context.subscription_count(), 0);
     }
 
@@ -688,7 +707,7 @@ mod tests {
         let payload = b"context take_subscription handoff";
 
         sender
-            .send_to(payload, SocketAddrV4::new(config.group, config.dst_port))
+            .send_to(payload, ipv4_group_socket_addr(&config))
             .unwrap();
 
         let deadline = Instant::now() + Duration::from_secs(1);
@@ -701,7 +720,7 @@ mod tests {
         };
 
         assert_eq!(packet.subscription_id, id);
-        assert_eq!(packet.group, std::net::IpAddr::V4(config.group));
+        assert_eq!(packet.group, std::net::IpAddr::V4(ipv4_group(&config)));
         assert_eq!(packet.dst_port, config.dst_port);
         assert_eq!(&packet.payload[..], payload);
     }
@@ -836,13 +855,13 @@ mod tests {
 
         let payload = b"context try_recv_any";
         sender
-            .send_to(payload, SocketAddrV4::new(config.group, config.dst_port))
+            .send_to(payload, ipv4_group_socket_addr(&config))
             .unwrap();
 
         let deadline = Instant::now() + Duration::from_secs(1);
         let packet = recv_next_packet(&mut context, deadline);
 
-        assert_eq!(packet.group, std::net::IpAddr::V4(config.group));
+        assert_eq!(packet.group, std::net::IpAddr::V4(ipv4_group(&config)));
         assert_eq!(packet.dst_port, config.dst_port);
         assert_eq!(&packet.payload[..], payload);
     }
@@ -858,7 +877,7 @@ mod tests {
 
         let payload = b"context try_recv_any_with_metadata";
         sender
-            .send_to(payload, SocketAddrV4::new(config.group, config.dst_port))
+            .send_to(payload, ipv4_group_socket_addr(&config))
             .unwrap();
 
         let deadline = Instant::now() + Duration::from_secs(1);
@@ -873,10 +892,10 @@ mod tests {
         };
 
         assert_eq!(packet.packet.subscription_id, id);
-        assert_eq!(packet.packet.group, std::net::IpAddr::V4(config.group));
+        assert_eq!(packet.packet.group, std::net::IpAddr::V4(ipv4_group(&config)));
         assert_eq!(packet.packet.dst_port, config.dst_port);
         assert_eq!(&packet.packet.payload[..], payload);
-        assert_pktinfo_metadata(&packet, std::net::IpAddr::V4(config.group));
+        assert_pktinfo_metadata(&packet, std::net::IpAddr::V4(ipv4_group(&config)));
         assert_eq!(
             packet.metadata.socket_local_addr,
             Some(std::net::SocketAddr::V4(SocketAddrV4::new(
@@ -900,14 +919,14 @@ mod tests {
 
         let payload = b"context add_subscription_with_socket";
         sender
-            .send_to(payload, SocketAddrV4::new(config.group, config.dst_port))
+            .send_to(payload, ipv4_group_socket_addr(&config))
             .unwrap();
 
         let deadline = Instant::now() + Duration::from_secs(1);
         let packet = recv_next_packet(&mut context, deadline);
 
         assert_eq!(packet.subscription_id, id);
-        assert_eq!(packet.group, std::net::IpAddr::V4(config.group));
+        assert_eq!(packet.group, std::net::IpAddr::V4(ipv4_group(&config)));
         assert_eq!(packet.dst_port, config.dst_port);
         assert_eq!(&packet.payload[..], payload);
     }

@@ -1,4 +1,4 @@
-use crate::config::{SourceFilter, SubscriptionConfig};
+use crate::config::{Ipv4Membership, SubscriptionAddressFamily, SubscriptionConfig};
 use crate::error::McrxError;
 use crate::packet::{Packet, PacketWithMetadata, ReceiveMetadata};
 use crate::subscription::SubscriptionId;
@@ -19,8 +19,16 @@ use windows_sys::Win32::Networking::WinSock::{
 #[cfg(windows)]
 use windows_sys::Win32::System::IO::OVERLAPPED;
 
-fn resolve_interface(config: &SubscriptionConfig) -> Ipv4Addr {
-    config.interface.unwrap_or(Ipv4Addr::UNSPECIFIED)
+fn ipv4_membership(config: &SubscriptionConfig) -> Result<Ipv4Membership, McrxError> {
+    config
+        .ipv4_membership()
+        .ok_or(McrxError::Ipv6NotYetImplemented)
+}
+
+fn resolve_ipv4_interface(config: &SubscriptionConfig) -> Result<Ipv4Addr, McrxError> {
+    Ok(ipv4_membership(config)?
+        .interface
+        .unwrap_or(Ipv4Addr::UNSPECIFIED))
 }
 
 #[cfg(all(
@@ -120,7 +128,7 @@ impl ReceiveSocket {
     fn base_metadata(&self, config: &SubscriptionConfig) -> Result<ReceiveMetadata, McrxError> {
         Ok(ReceiveMetadata {
             socket_local_addr: Some(self.local_addr()?),
-            configured_interface: config.interface.map(IpAddr::V4),
+            configured_interface: config.interface,
             destination_local_ip: None,
             ingress_interface_index: None,
         })
@@ -531,6 +539,10 @@ fn recv_packet_with_metadata_unix(
     subscription_id: SubscriptionId,
     config: &SubscriptionConfig,
 ) -> Result<Option<PacketWithMetadata>, McrxError> {
+    let group = match config.family() {
+        SubscriptionAddressFamily::Ipv4 => IpAddr::V4(ipv4_membership(config)?.group),
+        SubscriptionAddressFamily::Ipv6 => return Err(McrxError::Ipv6NotYetImplemented),
+    };
     let mut buf = [std::mem::MaybeUninit::<u8>::uninit(); 65535];
     let mut iov = libc::iovec {
         iov_base: buf.as_mut_ptr().cast(),
@@ -587,7 +599,7 @@ fn recv_packet_with_metadata_unix(
         packet: Packet {
             subscription_id,
             source,
-            group: IpAddr::V4(config.group),
+            group,
             dst_port: config.dst_port,
             payload: Bytes::copy_from_slice(payload_bytes),
         },
@@ -601,6 +613,10 @@ fn recv_packet_with_metadata_windows(
     subscription_id: SubscriptionId,
     config: &SubscriptionConfig,
 ) -> Result<Option<PacketWithMetadata>, McrxError> {
+    let group = match config.family() {
+        SubscriptionAddressFamily::Ipv4 => IpAddr::V4(ipv4_membership(config)?.group),
+        SubscriptionAddressFamily::Ipv6 => return Err(McrxError::Ipv6NotYetImplemented),
+    };
     let recvmsg = match socket.wsarecvmsg() {
         Some(recvmsg) => recvmsg,
         None => return recv_packet_impl(socket, subscription_id, config, true),
@@ -667,7 +683,7 @@ fn recv_packet_with_metadata_windows(
         packet: Packet {
             subscription_id,
             source,
-            group: IpAddr::V4(config.group),
+            group,
             dst_port: config.dst_port,
             payload: Bytes::copy_from_slice(payload_bytes),
         },
@@ -713,6 +729,10 @@ fn recv_packet_with_ancillary_metadata(
 /// The socket is bound to `0.0.0.0:dst_port` so it can receive multicast traffic
 /// destined for the configured UDP port. The socket is configured as non-blocking.
 pub(crate) fn open_bound_socket(config: &SubscriptionConfig) -> Result<ReceiveSocket, McrxError> {
+    if config.is_ipv6() {
+        return Err(McrxError::Ipv6NotYetImplemented);
+    }
+
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
         .map_err(McrxError::SocketCreateFailed)?;
 
@@ -740,6 +760,10 @@ pub(crate) fn prepare_existing_socket(
     socket: Socket,
     config: &SubscriptionConfig,
 ) -> Result<ReceiveSocket, McrxError> {
+    if config.is_ipv6() {
+        return Err(McrxError::Ipv6NotYetImplemented);
+    }
+
     let local_addr = socket_local_addr(&socket)?;
 
     match local_addr {
@@ -777,15 +801,16 @@ pub(crate) fn join_multicast_group(
     socket: &Socket,
     config: &SubscriptionConfig,
 ) -> Result<(), McrxError> {
-    let interface = resolve_interface(config);
+    let membership = ipv4_membership(config)?;
+    let interface = resolve_ipv4_interface(config)?;
 
-    match config.source {
-        SourceFilter::Any => socket
-            .join_multicast_v4(&config.group, &interface)
+    match membership.source {
+        None => socket
+            .join_multicast_v4(&membership.group, &interface)
             .map_err(McrxError::MulticastJoinFailed),
 
-        SourceFilter::Source(source) => socket
-            .join_ssm_v4(&source, &config.group, &interface)
+        Some(source) => socket
+            .join_ssm_v4(&source, &membership.group, &interface)
             .map_err(McrxError::MulticastJoinFailed),
     }
 }
@@ -797,15 +822,16 @@ pub(crate) fn leave_multicast_group(
     socket: &Socket,
     config: &SubscriptionConfig,
 ) -> Result<(), McrxError> {
-    let interface = resolve_interface(config);
+    let membership = ipv4_membership(config)?;
+    let interface = resolve_ipv4_interface(config)?;
 
-    match config.source {
-        SourceFilter::Any => socket
-            .leave_multicast_v4(&config.group, &interface)
+    match membership.source {
+        None => socket
+            .leave_multicast_v4(&membership.group, &interface)
             .map_err(McrxError::MulticastLeaveFailed),
 
-        SourceFilter::Source(source) => socket
-            .leave_ssm_v4(&source, &config.group, &interface)
+        Some(source) => socket
+            .leave_ssm_v4(&source, &membership.group, &interface)
             .map_err(McrxError::MulticastLeaveFailed),
     }
 }
@@ -816,6 +842,10 @@ fn recv_packet_impl(
     config: &SubscriptionConfig,
     include_metadata: bool,
 ) -> Result<Option<PacketWithMetadata>, McrxError> {
+    let group = match config.family() {
+        SubscriptionAddressFamily::Ipv4 => IpAddr::V4(ipv4_membership(config)?.group),
+        SubscriptionAddressFamily::Ipv6 => return Err(McrxError::Ipv6NotYetImplemented),
+    };
     let mut buf = [std::mem::MaybeUninit::<u8>::uninit(); 65535];
 
     match socket.socket().recv_from(&mut buf) {
@@ -837,7 +867,7 @@ fn recv_packet_impl(
                 packet: Packet {
                     subscription_id,
                     source,
-                    group: IpAddr::V4(config.group),
+                    group,
                     dst_port: config.dst_port,
                     payload: Bytes::copy_from_slice(payload_bytes),
                 },
@@ -925,6 +955,15 @@ mod tests {
         let socket = socket.unwrap();
         let result = join_multicast_group(socket.socket(), &config);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn open_bound_socket_rejects_ipv6_config_until_support_is_implemented() {
+        let config = SubscriptionConfig::asm_v6("ff3e::1234".parse().unwrap(), 55008);
+
+        let result = open_bound_socket(&config);
+
+        assert!(matches!(result, Err(McrxError::Ipv6NotYetImplemented)));
     }
 
     #[test]

@@ -1,6 +1,7 @@
 #![cfg(test)]
 
 use crate::{Context, Packet, SourceFilter, SubscriptionConfig};
+use std::net::IpAddr;
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -8,7 +9,7 @@ use std::time::{Duration, Instant};
 /// Creates a standard ASM test subscription configuration on the given port.
 pub(crate) fn sample_config(port: u16) -> SubscriptionConfig {
     SubscriptionConfig {
-        group: Ipv4Addr::new(239, 1, 2, 3),
+        group: IpAddr::V4(Ipv4Addr::new(239, 1, 2, 3)),
         source: SourceFilter::Any,
         dst_port: port,
         interface: None,
