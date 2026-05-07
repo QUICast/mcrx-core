@@ -363,8 +363,11 @@ mod tests {
     use super::*;
     use crate::config::{SourceFilter, SubscriptionConfig};
     use crate::platform;
-    use crate::test_support::{make_multicast_sender, sample_config};
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
+    use crate::test_support::{
+        ipv6_group_socket_addr, make_multicast_sender, make_multicast_sender_v6, sample_config,
+        sample_config_v6,
+    };
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6, UdpSocket};
     use std::time::{Duration, Instant};
 
     fn test_ssm_config(port: u16, interface: Ipv4Addr) -> SubscriptionConfig {
@@ -526,6 +529,50 @@ mod tests {
             )))
         );
         assert_eq!(packet.metadata.configured_interface, None);
+    }
+
+    #[test]
+    fn try_recv_with_metadata_exposes_current_ipv6_socket_context() {
+        let config = sample_config_v6(55039);
+        let socket = platform::open_bound_socket(&config).unwrap();
+        let mut subscription =
+            Subscription::from_receive_socket(SubscriptionId(1), config.clone(), socket);
+        platform::join_multicast_group(subscription.socket(), subscription.config()).unwrap();
+        subscription.mark_joined().unwrap();
+
+        let sender = make_multicast_sender_v6(Ipv6Addr::LOCALHOST);
+        let payload = b"hello detailed receive ipv6";
+
+        sender
+            .send_to(payload, ipv6_group_socket_addr(&config))
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let packet = loop {
+            match subscription.try_recv_with_metadata().unwrap() {
+                Some(packet) => break packet,
+                None if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                None => panic!("timed out waiting for IPv6 packet with metadata"),
+            }
+        };
+
+        assert_eq!(packet.packet.subscription_id, SubscriptionId(1));
+        assert_eq!(packet.packet.group, config.group);
+        assert_eq!(packet.packet.dst_port, config.dst_port);
+        assert_eq!(&packet.packet.payload[..], payload);
+        assert_pktinfo_metadata(&packet, config.group);
+        assert_eq!(
+            packet.metadata.socket_local_addr,
+            Some(SocketAddr::V6(SocketAddrV6::new(
+                Ipv6Addr::UNSPECIFIED,
+                config.dst_port,
+                0,
+                0,
+            )))
+        );
+        assert_eq!(packet.metadata.configured_interface, config.interface);
     }
 
     #[test]

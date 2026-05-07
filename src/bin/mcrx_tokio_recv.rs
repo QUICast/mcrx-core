@@ -1,6 +1,6 @@
 use mcrx_core::{Context, SubscriptionConfig, TokioSubscription};
 use std::env;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
 use std::process;
 
 const MAX_PREVIEW_LEN: usize = 64;
@@ -21,17 +21,17 @@ async fn run() -> Result<(), String> {
         return Err("invalid arguments".to_string());
     }
 
-    let group = parse_ipv4("group", &args[1])?;
+    let group = parse_ip("group", &args[1])?;
     let dst_port = parse_port(&args[2])?;
 
     let source = if args.len() >= 4 {
-        Some(parse_ipv4("source", &args[3])?)
+        Some(parse_ip("source", &args[3])?)
     } else {
         None
     };
 
     let interface = if args.len() >= 5 {
-        Some(parse_ipv4("interface", &args[4])?)
+        Some(parse_ip("interface", &args[4])?)
     } else {
         None
     };
@@ -41,10 +41,10 @@ async fn run() -> Result<(), String> {
     }
 
     let mut config = match source {
-        Some(source) => SubscriptionConfig::ssm(group, source, dst_port),
-        None => SubscriptionConfig::asm(group, dst_port),
+        Some(source) => SubscriptionConfig::ssm_ip(group, source, dst_port),
+        None => SubscriptionConfig::asm_ip(group, dst_port),
     };
-    config.interface = interface.map(IpAddr::V4);
+    config.interface = interface;
 
     let mut ctx = Context::new();
     let subscription_id = ctx
@@ -98,9 +98,9 @@ async fn run() -> Result<(), String> {
     }
 }
 
-fn parse_ipv4(name: &str, value: &str) -> Result<Ipv4Addr, String> {
+fn parse_ip(name: &str, value: &str) -> Result<IpAddr, String> {
     value
-        .parse::<Ipv4Addr>()
+        .parse::<IpAddr>()
         .map_err(|err| format!("invalid {name} '{value}': {err}"))
 }
 
@@ -116,14 +116,14 @@ fn parse_port(value: &str) -> Result<u16, String> {
     Ok(port)
 }
 
-fn source_string(source: Option<Ipv4Addr>) -> String {
+fn source_string(source: Option<IpAddr>) -> String {
     match source {
         Some(source) => source.to_string(),
         None => "any".to_string(),
     }
 }
 
-fn interface_string(interface: Option<Ipv4Addr>) -> String {
+fn interface_string(interface: Option<IpAddr>) -> String {
     match interface {
         Some(interface) => interface.to_string(),
         None => "default".to_string(),
@@ -162,8 +162,8 @@ fn truncate_preview(text: &str, max_len: usize) -> String {
 
 fn print_usage(program: &str) {
     eprintln!("usage: {program} <group> <dst_port> [source] [interface]");
-    eprintln!("  group      multicast IPv4 group, e.g. 239.1.2.3");
+    eprintln!("  group      multicast group, e.g. 239.1.2.3 or ff01::1234");
     eprintln!("  dst_port   destination UDP port");
-    eprintln!("  source     optional IPv4 source for SSM");
-    eprintln!("  interface  optional local IPv4 interface");
+    eprintln!("  source     optional source for SSM");
+    eprintln!("  interface  optional local interface address");
 }

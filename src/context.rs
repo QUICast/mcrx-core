@@ -490,11 +490,14 @@ mod tests {
     use crate::config::SourceFilter;
     use crate::subscription::SubscriptionState;
     use socket2::{Domain, Protocol, SockAddr, Socket, Type};
-    use std::net::{Ipv4Addr, SocketAddrV4};
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use crate::test_support::{make_multicast_sender, recv_next_packet, sample_config};
+    use crate::test_support::{
+        ipv6_group_socket_addr, make_multicast_sender, make_multicast_sender_v6, recv_next_packet,
+        sample_config, sample_config_v6,
+    };
 
     fn make_bound_external_socket(port: u16) -> Socket {
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
@@ -630,14 +633,67 @@ mod tests {
     }
 
     #[test]
-    fn ipv6_subscription_is_rejected_until_socket_support_is_implemented() {
+    fn try_recv_any_returns_packet_from_ready_ipv6_subscription() {
         let mut context = Context::new();
-        let config = SubscriptionConfig::asm_v6("ff3e::1234".parse().unwrap(), 5000);
+        let config = sample_config_v6(9032);
+        let id = context.add_subscription(config.clone()).unwrap();
+        context.join_subscription(id).unwrap();
 
-        let result = context.add_subscription(config);
+        let sender = make_multicast_sender_v6(std::net::Ipv6Addr::LOCALHOST);
+        let payload = b"context try_recv_any ipv6 asm";
+        sender
+            .send_to(payload, ipv6_group_socket_addr(&config))
+            .unwrap();
 
-        assert!(matches!(result, Err(McrxError::Ipv6NotYetImplemented)));
-        assert_eq!(context.subscription_count(), 0);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let packet = recv_next_packet(&mut context, deadline);
+
+        assert_eq!(packet.subscription_id, id);
+        assert_eq!(packet.group, config.group);
+        assert_eq!(packet.dst_port, config.dst_port);
+        assert_eq!(&packet.payload[..], payload);
+    }
+
+    #[test]
+    fn try_recv_any_with_metadata_returns_packet_from_ready_ipv6_subscription() {
+        let mut context = Context::new();
+        let config = sample_config_v6(9033);
+        let id = context.add_subscription(config.clone()).unwrap();
+        context.join_subscription(id).unwrap();
+
+        let sender = make_multicast_sender_v6(std::net::Ipv6Addr::LOCALHOST);
+
+        let payload = b"context try_recv_any_with_metadata ipv6 asm";
+        sender
+            .send_to(payload, ipv6_group_socket_addr(&config))
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let packet = loop {
+            match context.try_recv_any_with_metadata().unwrap() {
+                Some(packet) => break packet,
+                None if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                None => panic!("timed out waiting for IPv6 packet with metadata from context"),
+            }
+        };
+
+        assert_eq!(packet.packet.subscription_id, id);
+        assert_eq!(packet.packet.group, config.group);
+        assert_eq!(packet.packet.dst_port, config.dst_port);
+        assert_eq!(&packet.packet.payload[..], payload);
+        assert_pktinfo_metadata(&packet, config.group);
+        assert_eq!(packet.metadata.configured_interface, config.interface);
+        assert_eq!(
+            packet.metadata.socket_local_addr,
+            Some(std::net::SocketAddr::V6(SocketAddrV6::new(
+                Ipv6Addr::UNSPECIFIED,
+                config.dst_port,
+                0,
+                0,
+            )))
+        );
     }
 
     #[test]

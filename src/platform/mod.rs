@@ -1,20 +1,30 @@
-use crate::config::{Ipv4Membership, SubscriptionAddressFamily, SubscriptionConfig};
+use crate::config::{
+    Ipv4Membership, Ipv6Membership, SubscriptionAddressFamily, SubscriptionConfig,
+};
 use crate::error::McrxError;
 use crate::packet::{Packet, PacketWithMetadata, ReceiveMetadata};
 use crate::subscription::SubscriptionId;
 use bytes::Bytes;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use std::io::ErrorKind;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 #[cfg(windows)]
 use std::os::windows::io::AsRawSocket;
 #[cfg(windows)]
+use windows_sys::Win32::Foundation::{ERROR_BUFFER_OVERFLOW, NO_ERROR};
+#[cfg(windows)]
+use windows_sys::Win32::NetworkManagement::IpHelper::{
+    GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH,
+};
+#[cfg(windows)]
 use windows_sys::Win32::Networking::WinSock::{
-    CMSGHDR, IN_ADDR, IN_PKTINFO, IP_PKTINFO, IPPROTO_IP, LPFN_WSARECVMSG,
+    AF_INET6, AF_UNSPEC, CMSGHDR, IN_ADDR, IN6_ADDR, IN6_PKTINFO, IN_PKTINFO, IPPROTO_IP,
+    IPPROTO_IPV6, IP_PKTINFO, IPV6_PKTINFO, LPFN_WSARECVMSG,
     LPWSAOVERLAPPED_COMPLETION_ROUTINE, SIO_GET_EXTENSION_FUNCTION_POINTER, SOCKADDR, SOCKET,
-    SOCKET_ERROR, WSABUF, WSAGetLastError, WSAID_WSARECVMSG, WSAIoctl, WSAMSG, setsockopt,
+    SOCKADDR_IN6, SOCKET_ERROR, WSABUF, WSAGetLastError, WSAID_WSARECVMSG, WSAIoctl, WSAMSG,
+    setsockopt,
 };
 #[cfg(windows)]
 use windows_sys::Win32::System::IO::OVERLAPPED;
@@ -25,10 +35,24 @@ fn ipv4_membership(config: &SubscriptionConfig) -> Result<Ipv4Membership, McrxEr
         .ok_or(McrxError::Ipv6NotYetImplemented)
 }
 
+fn ipv6_membership(config: &SubscriptionConfig) -> Result<Ipv6Membership, McrxError> {
+    config
+        .ipv6_membership()
+        .ok_or(McrxError::Ipv6NotYetImplemented)
+}
+
 fn resolve_ipv4_interface(config: &SubscriptionConfig) -> Result<Ipv4Addr, McrxError> {
     Ok(ipv4_membership(config)?
         .interface
         .unwrap_or(Ipv4Addr::UNSPECIFIED))
+}
+
+fn resolve_ipv6_interface(config: &SubscriptionConfig) -> Result<u32, McrxError> {
+    match ipv6_membership(config)?.interface {
+        None => Ok(0),
+        Some(interface) if interface.is_unspecified() => Ok(0),
+        Some(interface) => resolve_ipv6_interface_index(interface),
+    }
 }
 
 #[cfg(all(
@@ -166,6 +190,120 @@ fn try_socket_local_addr(socket: &Socket) -> Result<SocketAddr, McrxError> {
         .ok_or(McrxError::NonIpSocketAddress)
 }
 
+fn socket_family(socket: &Socket) -> Option<SubscriptionAddressFamily> {
+    match try_socket_local_addr(socket).ok()? {
+        SocketAddr::V4(_) => Some(SubscriptionAddressFamily::Ipv4),
+        SocketAddr::V6(_) => Some(SubscriptionAddressFamily::Ipv6),
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn resolve_ipv6_interface_index(interface: Ipv6Addr) -> Result<u32, McrxError> {
+    unsafe {
+        let mut ifaddrs = std::ptr::null_mut();
+        if libc::getifaddrs(&mut ifaddrs) != 0 {
+            return Err(McrxError::InterfaceDiscoveryFailed(
+                std::io::Error::last_os_error().to_string(),
+            ));
+        }
+
+        let mut cursor = ifaddrs;
+        let mut matched_index = None;
+
+        while !cursor.is_null() {
+            let addr = (*cursor).ifa_addr;
+
+            if !addr.is_null() && (*addr).sa_family as libc::c_int == libc::AF_INET6 {
+                let sockaddr = &*(addr as *const libc::sockaddr_in6);
+                if Ipv6Addr::from(sockaddr.sin6_addr.s6_addr) == interface {
+                    let index = libc::if_nametoindex((*cursor).ifa_name);
+                    if index != 0 {
+                        matched_index = Some(index);
+                        break;
+                    }
+                }
+            }
+
+            cursor = (*cursor).ifa_next;
+        }
+
+        libc::freeifaddrs(ifaddrs);
+
+        matched_index.ok_or_else(|| {
+            McrxError::InterfaceDiscoveryFailed(format!(
+                "failed to resolve IPv6 interface address {interface} to an interface index"
+            ))
+        })
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn resolve_ipv6_interface_index(interface: Ipv6Addr) -> Result<u32, McrxError> {
+    const INITIAL_BUFFER_SIZE: usize = 15_000;
+
+    let mut buf_len = INITIAL_BUFFER_SIZE as u32;
+
+    loop {
+        let mut buffer = vec![0u8; buf_len as usize];
+        let result = unsafe {
+            GetAdaptersAddresses(
+                AF_UNSPEC as u32,
+                0,
+                std::ptr::null(),
+                buffer.as_mut_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>(),
+                &mut buf_len,
+            )
+        };
+
+        if result == ERROR_BUFFER_OVERFLOW {
+            continue;
+        }
+
+        if result != NO_ERROR {
+            return Err(McrxError::InterfaceDiscoveryFailed(format!(
+                "GetAdaptersAddresses failed with status {result}"
+            )));
+        }
+
+        let mut adapter = buffer.as_mut_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>();
+
+        unsafe {
+            while !adapter.is_null() {
+                let mut unicast = (*adapter).FirstUnicastAddress;
+
+                while !unicast.is_null() {
+                    let socket_address = (*unicast).Address;
+
+                    if !socket_address.lpSockaddr.is_null()
+                        && (*socket_address.lpSockaddr).sa_family == AF_INET6
+                    {
+                        let sockaddr = &*(socket_address.lpSockaddr as *const SOCKADDR_IN6);
+                        let candidate = Ipv6Addr::from(sockaddr.sin6_addr.u.Byte);
+                        if candidate == interface {
+                            return Ok((*adapter).Ipv6IfIndex);
+                        }
+                    }
+
+                    unicast = (*unicast).Next;
+                }
+
+                adapter = (*adapter).Next;
+            }
+        }
+
+        return Err(McrxError::InterfaceDiscoveryFailed(format!(
+            "failed to resolve IPv6 interface address {interface} to an interface index"
+        )));
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn resolve_ipv6_interface_index(interface: Ipv6Addr) -> Result<u32, McrxError> {
+    Err(McrxError::InterfaceDiscoveryFailed(format!(
+        "IPv6 interface resolution is not implemented on this platform for {interface}"
+    )))
+}
+
 #[cfg(windows)]
 fn set_socket_option_flag(socket: &Socket, level: i32, name: i32) -> Result<(), McrxError> {
     let enabled: u32 = 1;
@@ -245,8 +383,18 @@ fn set_socket_option_flag(
 }
 
 #[cfg(all(unix, any(target_os = "linux", target_os = "android")))]
-fn enable_receive_metadata(socket: &Socket) -> Result<(), McrxError> {
-    set_socket_option_flag(socket, libc::IPPROTO_IP, libc::IP_PKTINFO)
+fn enable_receive_metadata(
+    socket: &Socket,
+    family: SubscriptionAddressFamily,
+) -> Result<(), McrxError> {
+    match family {
+        SubscriptionAddressFamily::Ipv4 => {
+            set_socket_option_flag(socket, libc::IPPROTO_IP, libc::IP_PKTINFO)
+        }
+        SubscriptionAddressFamily::Ipv6 => {
+            set_socket_option_flag(socket, libc::IPPROTO_IPV6, libc::IPV6_RECVPKTINFO)
+        }
+    }
 }
 
 #[cfg(all(
@@ -259,19 +407,43 @@ fn enable_receive_metadata(socket: &Socket) -> Result<(), McrxError> {
         target_os = "openbsd"
     )
 ))]
-fn enable_receive_metadata(socket: &Socket) -> Result<(), McrxError> {
-    set_socket_option_flag(socket, libc::IPPROTO_IP, libc::IP_RECVDSTADDR)?;
-    set_socket_option_flag(socket, libc::IPPROTO_IP, libc::IP_RECVIF)
+fn enable_receive_metadata(
+    socket: &Socket,
+    family: SubscriptionAddressFamily,
+) -> Result<(), McrxError> {
+    match family {
+        SubscriptionAddressFamily::Ipv4 => {
+            set_socket_option_flag(socket, libc::IPPROTO_IP, libc::IP_RECVDSTADDR)?;
+            set_socket_option_flag(socket, libc::IPPROTO_IP, libc::IP_RECVIF)
+        }
+        SubscriptionAddressFamily::Ipv6 => {
+            set_socket_option_flag(socket, libc::IPPROTO_IPV6, libc::IPV6_RECVPKTINFO)
+        }
+    }
 }
 
 #[cfg(windows)]
-fn enable_receive_metadata(socket: &Socket) -> Result<(), McrxError> {
-    set_socket_option_flag(socket, IPPROTO_IP as i32, IP_PKTINFO)
+fn enable_receive_metadata(
+    socket: &Socket,
+    family: SubscriptionAddressFamily,
+) -> Result<(), McrxError> {
+    match family {
+        SubscriptionAddressFamily::Ipv4 => {
+            set_socket_option_flag(socket, IPPROTO_IP as i32, IP_PKTINFO)
+        }
+        SubscriptionAddressFamily::Ipv6 => {
+            set_socket_option_flag(socket, IPPROTO_IPV6 as i32, IPV6_PKTINFO)
+        }
+    }
 }
 
 #[cfg(all(unix, any(target_os = "linux", target_os = "android")))]
 fn configure_detailed_receive(socket: &Socket) -> DetailedReceiveMode {
-    if enable_receive_metadata(socket).is_ok() {
+    let Some(family) = socket_family(socket) else {
+        return DetailedReceiveMode::Basic;
+    };
+
+    if enable_receive_metadata(socket, family).is_ok() {
         DetailedReceiveMode::Ancillary
     } else {
         DetailedReceiveMode::Basic
@@ -289,7 +461,11 @@ fn configure_detailed_receive(socket: &Socket) -> DetailedReceiveMode {
     )
 ))]
 fn configure_detailed_receive(socket: &Socket) -> DetailedReceiveMode {
-    if enable_receive_metadata(socket).is_ok() {
+    let Some(family) = socket_family(socket) else {
+        return DetailedReceiveMode::Basic;
+    };
+
+    if enable_receive_metadata(socket, family).is_ok() {
         DetailedReceiveMode::Ancillary
     } else {
         DetailedReceiveMode::Basic
@@ -298,7 +474,11 @@ fn configure_detailed_receive(socket: &Socket) -> DetailedReceiveMode {
 
 #[cfg(windows)]
 fn configure_detailed_receive(socket: &Socket) -> (DetailedReceiveMode, Option<WsaRecvMsgFn>) {
-    if enable_receive_metadata(socket).is_err() {
+    let Some(family) = socket_family(socket) else {
+        return (DetailedReceiveMode::Basic, None);
+    };
+
+    if enable_receive_metadata(socket, family).is_err() {
         return (DetailedReceiveMode::Basic, None);
     }
 
@@ -337,9 +517,30 @@ fn ipv4_from_in_addr(addr: IN_ADDR) -> Ipv4Addr {
     Ipv4Addr::from(u32::from_be(raw))
 }
 
+#[cfg(unix)]
+fn ipv6_from_in6_addr(addr: libc::in6_addr) -> Ipv6Addr {
+    Ipv6Addr::from(addr.s6_addr)
+}
+
+#[cfg(windows)]
+fn ipv6_from_in6_addr(addr: IN6_ADDR) -> Ipv6Addr {
+    let raw = unsafe { addr.u.Byte };
+    Ipv6Addr::from(raw)
+}
+
 #[cfg(all(unix, any(target_os = "linux", target_os = "android")))]
-fn ancillary_buffer_size() -> usize {
-    unsafe { libc::CMSG_SPACE(std::mem::size_of::<libc::in_pktinfo>() as libc::c_uint) as usize }
+fn ancillary_buffer_size(family: SubscriptionAddressFamily) -> usize {
+    unsafe {
+        match family {
+            SubscriptionAddressFamily::Ipv4 => {
+                libc::CMSG_SPACE(std::mem::size_of::<libc::in_pktinfo>() as libc::c_uint) as usize
+            }
+            SubscriptionAddressFamily::Ipv6 => {
+                libc::CMSG_SPACE(std::mem::size_of::<libc::in6_pktinfo>() as libc::c_uint)
+                    as usize
+            }
+        }
+    }
 }
 
 #[cfg(all(
@@ -352,11 +553,20 @@ fn ancillary_buffer_size() -> usize {
         target_os = "openbsd"
     )
 ))]
-fn ancillary_buffer_size() -> usize {
+fn ancillary_buffer_size(family: SubscriptionAddressFamily) -> usize {
     unsafe {
-        let dst = libc::CMSG_SPACE(std::mem::size_of::<libc::in_addr>() as libc::c_uint);
-        let iface = libc::CMSG_SPACE(std::mem::size_of::<libc::sockaddr_dl>() as libc::c_uint);
-        (dst + iface) as usize
+        match family {
+            SubscriptionAddressFamily::Ipv4 => {
+                let dst = libc::CMSG_SPACE(std::mem::size_of::<libc::in_addr>() as libc::c_uint);
+                let iface =
+                    libc::CMSG_SPACE(std::mem::size_of::<libc::sockaddr_dl>() as libc::c_uint);
+                (dst + iface) as usize
+            }
+            SubscriptionAddressFamily::Ipv6 => {
+                libc::CMSG_SPACE(std::mem::size_of::<libc::in6_pktinfo>() as libc::c_uint)
+                    as usize
+            }
+        }
     }
 }
 
@@ -377,8 +587,11 @@ fn wsa_cmsg_len(length: usize) -> usize {
 }
 
 #[cfg(windows)]
-fn ancillary_buffer_size() -> usize {
-    wsa_cmsg_space(std::mem::size_of::<IN_PKTINFO>())
+fn ancillary_buffer_size(family: SubscriptionAddressFamily) -> usize {
+    match family {
+        SubscriptionAddressFamily::Ipv4 => wsa_cmsg_space(std::mem::size_of::<IN_PKTINFO>()),
+        SubscriptionAddressFamily::Ipv6 => wsa_cmsg_space(std::mem::size_of::<IN6_PKTINFO>()),
+    }
 }
 
 #[cfg(not(any(
@@ -395,7 +608,7 @@ fn ancillary_buffer_size() -> usize {
         )
     )
 )))]
-fn ancillary_buffer_size() -> usize {
+fn ancillary_buffer_size(_family: SubscriptionAddressFamily) -> usize {
     0
 }
 
@@ -461,47 +674,73 @@ struct SockAddrDlPrefix {
 }
 
 #[cfg(unix)]
-fn apply_receive_ancillary_data(msg: &libc::msghdr, metadata: &mut ReceiveMetadata) {
+fn apply_receive_ancillary_data(
+    msg: &libc::msghdr,
+    metadata: &mut ReceiveMetadata,
+    family: SubscriptionAddressFamily,
+) {
     unsafe {
         let mut cmsg = libc::CMSG_FIRSTHDR(msg);
 
         while !cmsg.is_null() {
-            if (*cmsg).cmsg_level == libc::IPPROTO_IP {
-                #[cfg(any(target_os = "linux", target_os = "android"))]
-                if (*cmsg).cmsg_type == libc::IP_PKTINFO
-                    && control_message_contains::<libc::in_pktinfo>(cmsg)
-                {
-                    let pktinfo =
-                        std::ptr::read_unaligned(libc::CMSG_DATA(cmsg) as *const libc::in_pktinfo);
-                    metadata.destination_local_ip =
-                        Some(IpAddr::V4(ipv4_from_in_addr(pktinfo.ipi_addr)));
-                    if pktinfo.ipi_ifindex != 0 {
-                        metadata.ingress_interface_index = Some(pktinfo.ipi_ifindex as u32);
-                    }
-                }
+            match family {
+                SubscriptionAddressFamily::Ipv4 => {
+                    if (*cmsg).cmsg_level == libc::IPPROTO_IP {
+                        #[cfg(any(target_os = "linux", target_os = "android"))]
+                        if (*cmsg).cmsg_type == libc::IP_PKTINFO
+                            && control_message_contains::<libc::in_pktinfo>(cmsg)
+                        {
+                            let pktinfo = std::ptr::read_unaligned(
+                                libc::CMSG_DATA(cmsg) as *const libc::in_pktinfo
+                            );
+                            metadata.destination_local_ip =
+                                Some(IpAddr::V4(ipv4_from_in_addr(pktinfo.ipi_addr)));
+                            if pktinfo.ipi_ifindex != 0 {
+                                metadata.ingress_interface_index = Some(pktinfo.ipi_ifindex as u32);
+                            }
+                        }
 
-                #[cfg(any(
-                    target_vendor = "apple",
-                    target_os = "freebsd",
-                    target_os = "dragonfly",
-                    target_os = "netbsd",
-                    target_os = "openbsd"
-                ))]
-                match (*cmsg).cmsg_type {
-                    libc::IP_RECVDSTADDR if control_message_contains::<libc::in_addr>(cmsg) => {
-                        let addr =
-                            std::ptr::read_unaligned(libc::CMSG_DATA(cmsg) as *const libc::in_addr);
-                        metadata.destination_local_ip = Some(IpAddr::V4(ipv4_from_in_addr(addr)));
-                    }
-                    libc::IP_RECVIF if control_message_contains::<SockAddrDlPrefix>(cmsg) => {
-                        let addr = std::ptr::read_unaligned(
-                            libc::CMSG_DATA(cmsg) as *const SockAddrDlPrefix
-                        );
-                        if addr.sdl_index != 0 {
-                            metadata.ingress_interface_index = Some(addr.sdl_index as u32);
+                        #[cfg(any(
+                            target_vendor = "apple",
+                            target_os = "freebsd",
+                            target_os = "dragonfly",
+                            target_os = "netbsd",
+                            target_os = "openbsd"
+                        ))]
+                        match (*cmsg).cmsg_type {
+                            libc::IP_RECVDSTADDR if control_message_contains::<libc::in_addr>(cmsg) => {
+                                let addr = std::ptr::read_unaligned(
+                                    libc::CMSG_DATA(cmsg) as *const libc::in_addr
+                                );
+                                metadata.destination_local_ip =
+                                    Some(IpAddr::V4(ipv4_from_in_addr(addr)));
+                            }
+                            libc::IP_RECVIF if control_message_contains::<SockAddrDlPrefix>(cmsg) => {
+                                let addr = std::ptr::read_unaligned(
+                                    libc::CMSG_DATA(cmsg) as *const SockAddrDlPrefix
+                                );
+                                if addr.sdl_index != 0 {
+                                    metadata.ingress_interface_index = Some(addr.sdl_index as u32);
+                                }
+                            }
+                            _ => {}
                         }
                     }
-                    _ => {}
+                }
+                SubscriptionAddressFamily::Ipv6 => {
+                    if (*cmsg).cmsg_level == libc::IPPROTO_IPV6
+                        && (*cmsg).cmsg_type == libc::IPV6_PKTINFO
+                        && control_message_contains::<libc::in6_pktinfo>(cmsg)
+                    {
+                        let pktinfo = std::ptr::read_unaligned(
+                            libc::CMSG_DATA(cmsg) as *const libc::in6_pktinfo
+                        );
+                        metadata.destination_local_ip =
+                            Some(IpAddr::V6(ipv6_from_in6_addr(pktinfo.ipi6_addr)));
+                        if pktinfo.ipi6_ifindex != 0 {
+                            metadata.ingress_interface_index = Some(pktinfo.ipi6_ifindex as u32);
+                        }
+                    }
                 }
             }
 
@@ -511,20 +750,43 @@ fn apply_receive_ancillary_data(msg: &libc::msghdr, metadata: &mut ReceiveMetada
 }
 
 #[cfg(windows)]
-fn apply_receive_ancillary_data(msg: &WSAMSG, metadata: &mut ReceiveMetadata) {
+fn apply_receive_ancillary_data(
+    msg: &WSAMSG,
+    metadata: &mut ReceiveMetadata,
+    family: SubscriptionAddressFamily,
+) {
     unsafe {
         let mut cmsg = wsa_cmsg_firsthdr(msg);
 
         while !cmsg.is_null() {
-            if (*cmsg).cmsg_level == IPPROTO_IP
-                && (*cmsg).cmsg_type == IP_PKTINFO
-                && control_message_contains::<IN_PKTINFO>(cmsg)
-            {
-                let pktinfo = std::ptr::read_unaligned(wsa_cmsg_data(cmsg) as *const IN_PKTINFO);
-                metadata.destination_local_ip =
-                    Some(IpAddr::V4(ipv4_from_in_addr(pktinfo.ipi_addr)));
-                if pktinfo.ipi_ifindex != 0 {
-                    metadata.ingress_interface_index = Some(pktinfo.ipi_ifindex);
+            match family {
+                SubscriptionAddressFamily::Ipv4 => {
+                    if (*cmsg).cmsg_level == IPPROTO_IP
+                        && (*cmsg).cmsg_type == IP_PKTINFO
+                        && control_message_contains::<IN_PKTINFO>(cmsg)
+                    {
+                        let pktinfo =
+                            std::ptr::read_unaligned(wsa_cmsg_data(cmsg) as *const IN_PKTINFO);
+                        metadata.destination_local_ip =
+                            Some(IpAddr::V4(ipv4_from_in_addr(pktinfo.ipi_addr)));
+                        if pktinfo.ipi_ifindex != 0 {
+                            metadata.ingress_interface_index = Some(pktinfo.ipi_ifindex);
+                        }
+                    }
+                }
+                SubscriptionAddressFamily::Ipv6 => {
+                    if (*cmsg).cmsg_level == IPPROTO_IPV6
+                        && (*cmsg).cmsg_type == IPV6_PKTINFO
+                        && control_message_contains::<IN6_PKTINFO>(cmsg)
+                    {
+                        let pktinfo =
+                            std::ptr::read_unaligned(wsa_cmsg_data(cmsg) as *const IN6_PKTINFO);
+                        metadata.destination_local_ip =
+                            Some(IpAddr::V6(ipv6_from_in6_addr(pktinfo.ipi6_addr)));
+                        if pktinfo.ipi6_ifindex != 0 {
+                            metadata.ingress_interface_index = Some(pktinfo.ipi6_ifindex);
+                        }
+                    }
                 }
             }
 
@@ -539,16 +801,15 @@ fn recv_packet_with_metadata_unix(
     subscription_id: SubscriptionId,
     config: &SubscriptionConfig,
 ) -> Result<Option<PacketWithMetadata>, McrxError> {
-    let group = match config.family() {
-        SubscriptionAddressFamily::Ipv4 => IpAddr::V4(ipv4_membership(config)?.group),
-        SubscriptionAddressFamily::Ipv6 => return Err(McrxError::Ipv6NotYetImplemented),
-    };
+    let group = config.group;
+    let family = config.family();
     let mut buf = [std::mem::MaybeUninit::<u8>::uninit(); 65535];
     let mut iov = libc::iovec {
         iov_base: buf.as_mut_ptr().cast(),
         iov_len: buf.len(),
     };
-    let mut control = vec![std::mem::MaybeUninit::<u8>::uninit(); ancillary_buffer_size()];
+    let mut control =
+        vec![std::mem::MaybeUninit::<u8>::uninit(); ancillary_buffer_size(family)];
     let mut control_len = 0usize;
 
     let (len, addr) = match unsafe {
@@ -592,7 +853,7 @@ fn recv_packet_with_metadata_unix(
         let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
         msg.msg_control = control.as_mut_ptr().cast();
         msg.msg_controllen = control_len as _;
-        apply_receive_ancillary_data(&msg, &mut metadata);
+        apply_receive_ancillary_data(&msg, &mut metadata, family);
     }
 
     Ok(Some(PacketWithMetadata {
@@ -613,10 +874,8 @@ fn recv_packet_with_metadata_windows(
     subscription_id: SubscriptionId,
     config: &SubscriptionConfig,
 ) -> Result<Option<PacketWithMetadata>, McrxError> {
-    let group = match config.family() {
-        SubscriptionAddressFamily::Ipv4 => IpAddr::V4(ipv4_membership(config)?.group),
-        SubscriptionAddressFamily::Ipv6 => return Err(McrxError::Ipv6NotYetImplemented),
-    };
+    let group = config.group;
+    let family = config.family();
     let recvmsg = match socket.wsarecvmsg() {
         Some(recvmsg) => recvmsg,
         None => return recv_packet_impl(socket, subscription_id, config, true),
@@ -626,7 +885,8 @@ fn recv_packet_with_metadata_windows(
         len: buf.len() as u32,
         buf: buf.as_mut_ptr().cast(),
     };
-    let mut control = vec![std::mem::MaybeUninit::<u8>::uninit(); ancillary_buffer_size()];
+    let mut control =
+        vec![std::mem::MaybeUninit::<u8>::uninit(); ancillary_buffer_size(family)];
     let mut bytes_received = 0u32;
 
     let (msg, addr) = match unsafe {
@@ -676,7 +936,7 @@ fn recv_packet_with_metadata_windows(
     let mut metadata = socket.base_metadata(config)?;
 
     if !msg.Control.buf.is_null() && msg.Control.len != 0 {
-        apply_receive_ancillary_data(&msg, &mut metadata);
+        apply_receive_ancillary_data(&msg, &mut metadata, family);
     }
 
     Ok(Some(PacketWithMetadata {
@@ -729,12 +989,20 @@ fn recv_packet_with_ancillary_metadata(
 /// The socket is bound to `0.0.0.0:dst_port` so it can receive multicast traffic
 /// destined for the configured UDP port. The socket is configured as non-blocking.
 pub(crate) fn open_bound_socket(config: &SubscriptionConfig) -> Result<ReceiveSocket, McrxError> {
-    if config.is_ipv6() {
-        return Err(McrxError::Ipv6NotYetImplemented);
-    }
-
-    let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
-        .map_err(McrxError::SocketCreateFailed)?;
+    let socket = match config.family() {
+        SubscriptionAddressFamily::Ipv4 => {
+            Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
+                .map_err(McrxError::SocketCreateFailed)?
+        }
+        SubscriptionAddressFamily::Ipv6 => {
+            let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))
+                .map_err(McrxError::SocketCreateFailed)?;
+            socket
+                .set_only_v6(true)
+                .map_err(McrxError::SocketOptionFailed)?;
+            socket
+        }
+    };
 
     socket
         .set_reuse_address(true)
@@ -742,11 +1010,20 @@ pub(crate) fn open_bound_socket(config: &SubscriptionConfig) -> Result<ReceiveSo
 
     set_port_reuse_if_supported(&socket).map_err(McrxError::SocketOptionFailed)?;
 
-    let bind_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, config.dst_port);
-
-    socket
-        .bind(&SockAddr::from(bind_addr))
-        .map_err(McrxError::SocketBindFailed)?;
+    match config.family() {
+        SubscriptionAddressFamily::Ipv4 => {
+            let bind_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, config.dst_port);
+            socket
+                .bind(&SockAddr::from(bind_addr))
+                .map_err(McrxError::SocketBindFailed)?;
+        }
+        SubscriptionAddressFamily::Ipv6 => {
+            let bind_addr = SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, config.dst_port, 0, 0);
+            socket
+                .bind(&SockAddr::from(bind_addr))
+                .map_err(McrxError::SocketBindFailed)?;
+        }
+    }
 
     prepare_existing_socket(socket, config)
 }
@@ -760,14 +1037,10 @@ pub(crate) fn prepare_existing_socket(
     socket: Socket,
     config: &SubscriptionConfig,
 ) -> Result<ReceiveSocket, McrxError> {
-    if config.is_ipv6() {
-        return Err(McrxError::Ipv6NotYetImplemented);
-    }
-
     let local_addr = socket_local_addr(&socket)?;
 
-    match local_addr {
-        SocketAddr::V4(addr) => {
+    match (config.family(), local_addr) {
+        (SubscriptionAddressFamily::Ipv4, SocketAddr::V4(addr)) => {
             if addr.port() != config.dst_port {
                 return Err(McrxError::ExistingSocketPortMismatch {
                     expected: config.dst_port,
@@ -775,8 +1048,17 @@ pub(crate) fn prepare_existing_socket(
                 });
             }
         }
-        SocketAddr::V6(_) => {
-            return Err(McrxError::ExistingSocketMustBeIpv4);
+        (SubscriptionAddressFamily::Ipv6, SocketAddr::V6(addr)) => {
+            if addr.port() != config.dst_port {
+                return Err(McrxError::ExistingSocketPortMismatch {
+                    expected: config.dst_port,
+                    actual: addr.port(),
+                });
+            }
+        }
+        (SubscriptionAddressFamily::Ipv4, SocketAddr::V6(_))
+        | (SubscriptionAddressFamily::Ipv6, SocketAddr::V4(_)) => {
+            return Err(McrxError::ExistingSocketAddressFamilyMismatch);
         }
     }
 
@@ -801,17 +1083,32 @@ pub(crate) fn join_multicast_group(
     socket: &Socket,
     config: &SubscriptionConfig,
 ) -> Result<(), McrxError> {
-    let membership = ipv4_membership(config)?;
-    let interface = resolve_ipv4_interface(config)?;
+    match config.family() {
+        SubscriptionAddressFamily::Ipv4 => {
+            let membership = ipv4_membership(config)?;
+            let interface = resolve_ipv4_interface(config)?;
 
-    match membership.source {
-        None => socket
-            .join_multicast_v4(&membership.group, &interface)
-            .map_err(McrxError::MulticastJoinFailed),
+            match membership.source {
+                None => socket
+                    .join_multicast_v4(&membership.group, &interface)
+                    .map_err(McrxError::MulticastJoinFailed),
 
-        Some(source) => socket
-            .join_ssm_v4(&source, &membership.group, &interface)
-            .map_err(McrxError::MulticastJoinFailed),
+                Some(source) => socket
+                    .join_ssm_v4(&source, &membership.group, &interface)
+                    .map_err(McrxError::MulticastJoinFailed),
+            }
+        }
+        SubscriptionAddressFamily::Ipv6 => {
+            let membership = ipv6_membership(config)?;
+            let interface = resolve_ipv6_interface(config)?;
+
+            match membership.source {
+                None => socket
+                    .join_multicast_v6(&membership.group, interface)
+                    .map_err(McrxError::MulticastJoinFailed),
+                Some(_) => Err(McrxError::Ipv6SourceSpecificMulticastNotYetImplemented),
+            }
+        }
     }
 }
 
@@ -822,17 +1119,32 @@ pub(crate) fn leave_multicast_group(
     socket: &Socket,
     config: &SubscriptionConfig,
 ) -> Result<(), McrxError> {
-    let membership = ipv4_membership(config)?;
-    let interface = resolve_ipv4_interface(config)?;
+    match config.family() {
+        SubscriptionAddressFamily::Ipv4 => {
+            let membership = ipv4_membership(config)?;
+            let interface = resolve_ipv4_interface(config)?;
 
-    match membership.source {
-        None => socket
-            .leave_multicast_v4(&membership.group, &interface)
-            .map_err(McrxError::MulticastLeaveFailed),
+            match membership.source {
+                None => socket
+                    .leave_multicast_v4(&membership.group, &interface)
+                    .map_err(McrxError::MulticastLeaveFailed),
 
-        Some(source) => socket
-            .leave_ssm_v4(&source, &membership.group, &interface)
-            .map_err(McrxError::MulticastLeaveFailed),
+                Some(source) => socket
+                    .leave_ssm_v4(&source, &membership.group, &interface)
+                    .map_err(McrxError::MulticastLeaveFailed),
+            }
+        }
+        SubscriptionAddressFamily::Ipv6 => {
+            let membership = ipv6_membership(config)?;
+            let interface = resolve_ipv6_interface(config)?;
+
+            match membership.source {
+                None => socket
+                    .leave_multicast_v6(&membership.group, interface)
+                    .map_err(McrxError::MulticastLeaveFailed),
+                Some(_) => Err(McrxError::Ipv6SourceSpecificMulticastNotYetImplemented),
+            }
+        }
     }
 }
 
@@ -842,10 +1154,7 @@ fn recv_packet_impl(
     config: &SubscriptionConfig,
     include_metadata: bool,
 ) -> Result<Option<PacketWithMetadata>, McrxError> {
-    let group = match config.family() {
-        SubscriptionAddressFamily::Ipv4 => IpAddr::V4(ipv4_membership(config)?.group),
-        SubscriptionAddressFamily::Ipv6 => return Err(McrxError::Ipv6NotYetImplemented),
-    };
+    let group = config.group;
     let mut buf = [std::mem::MaybeUninit::<u8>::uninit(); 65535];
 
     match socket.socket().recv_from(&mut buf) {
@@ -906,7 +1215,7 @@ pub(crate) fn recv_packet_with_metadata(
 mod tests {
     use super::*;
     use crate::config::SubscriptionConfig;
-    use std::net::Ipv4Addr;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use std::sync::atomic::{AtomicU16, Ordering};
 
     static NEXT_TEST_PORT: AtomicU16 = AtomicU16::new(55100);
@@ -927,6 +1236,12 @@ mod tests {
         }
 
         panic!("failed to find an available UDP port for the receive socket test");
+    }
+
+    fn ipv6_asm_test_config(port: u16) -> SubscriptionConfig {
+        let mut config = SubscriptionConfig::asm_v6("ff01::1234".parse().unwrap(), port);
+        config.interface = Some(IpAddr::V6(Ipv6Addr::LOCALHOST));
+        config
     }
 
     #[test]
@@ -958,12 +1273,33 @@ mod tests {
     }
 
     #[test]
-    fn open_bound_socket_rejects_ipv6_config_until_support_is_implemented() {
-        let config = SubscriptionConfig::asm_v6("ff3e::1234".parse().unwrap(), 55008);
+    fn open_and_join_socket_succeeds_for_valid_ipv6_asm_config() {
+        let config = ipv6_asm_test_config(55008);
 
-        let result = open_bound_socket(&config);
+        let socket = open_bound_socket(&config);
+        assert!(socket.is_ok());
 
-        assert!(matches!(result, Err(McrxError::Ipv6NotYetImplemented)));
+        let socket = socket.unwrap();
+        let result = join_multicast_group(socket.socket(), &config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn join_multicast_group_rejects_ipv6_ssm_until_supported() {
+        let mut config = SubscriptionConfig::ssm_v6(
+            "ff01::1234".parse().unwrap(),
+            "2001:db8::10".parse().unwrap(),
+            55018,
+        );
+        config.interface = Some(IpAddr::V6(Ipv6Addr::LOCALHOST));
+
+        let socket = open_bound_socket(&config).unwrap();
+        let result = join_multicast_group(socket.socket(), &config);
+
+        assert!(matches!(
+            result,
+            Err(McrxError::Ipv6SourceSpecificMulticastNotYetImplemented)
+        ));
     }
 
     #[test]

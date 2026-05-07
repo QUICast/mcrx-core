@@ -43,6 +43,13 @@ pub(crate) struct Ipv4Membership {
     pub(crate) interface: Option<Ipv4Addr>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Ipv6Membership {
+    pub(crate) group: Ipv6Addr,
+    pub(crate) source: Option<Ipv6Addr>,
+    pub(crate) interface: Option<Ipv6Addr>,
+}
+
 impl SubscriptionConfig {
     /// Validates the configuration and returns an error if it is not usable.
     pub fn validate(&self) -> Result<(), McrxError> {
@@ -159,6 +166,31 @@ impl SubscriptionConfig {
         };
 
         Some(Ipv4Membership {
+            group,
+            source,
+            interface,
+        })
+    }
+
+    pub(crate) fn ipv6_membership(&self) -> Option<Ipv6Membership> {
+        let group = match self.group {
+            IpAddr::V6(group) => group,
+            IpAddr::V4(_) => return None,
+        };
+
+        let source = match self.source {
+            SourceFilter::Any => None,
+            SourceFilter::Source(IpAddr::V6(source)) => Some(source),
+            SourceFilter::Source(IpAddr::V4(_)) => return None,
+        };
+
+        let interface = match self.interface {
+            None => None,
+            Some(IpAddr::V6(interface)) => Some(interface),
+            Some(IpAddr::V4(_)) => return None,
+        };
+
+        Some(Ipv6Membership {
             group,
             source,
             interface,

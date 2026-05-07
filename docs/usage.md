@@ -26,8 +26,10 @@ let mut config = SubscriptionConfig::asm(group, port);
 config.interface = Some(interface.into());
 ```
 
-`SubscriptionConfig` can now represent either IPv4 or IPv6 addresses, but the
-active receive path remains IPv4-only until the socket layer grows IPv6 support.
+`SubscriptionConfig` can represent either IPv4 or IPv6 addresses. The active
+receive path supports IPv4 ASM/SSM and IPv6 ASM today. The metadata-aware
+receive APIs also expose pktinfo-style metadata for both families on platforms
+that provide it. IPv6 SSM is still pending.
 
 ## Existing Sockets
 

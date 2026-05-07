@@ -52,8 +52,8 @@ pub enum McrxError {
     #[error("MCRX: failed to bind UDP socket: {0}")]
     SocketBindFailed(io::Error),
 
-    /// IPv6 subscription support has not been wired into the socket layer yet.
-    #[error("MCRX: IPv6 subscription support is not implemented yet")]
+    /// The requested IPv6 functionality is not implemented yet.
+    #[error("MCRX: requested IPv6 functionality is not implemented yet")]
     Ipv6NotYetImplemented,
 
     /// Reading the local address of an existing socket failed.
@@ -64,9 +64,9 @@ pub enum McrxError {
     #[error("MCRX: failed to look up socket extension function: {0}")]
     SocketIoctlFailed(io::Error),
 
-    /// The provided existing socket does not match the current IPv4-only receive model.
-    #[error("MCRX: existing socket must be an IPv4 UDP socket")]
-    ExistingSocketMustBeIpv4,
+    /// The provided existing socket family does not match the subscription configuration.
+    #[error("MCRX: existing socket address family does not match the subscription configuration")]
+    ExistingSocketAddressFamilyMismatch,
 
     /// The provided existing socket is bound to a different UDP port than the subscription.
     #[error("MCRX: existing socket is bound to UDP port {actual}, expected {expected}")]
@@ -83,6 +83,10 @@ pub enum McrxError {
     /// Source-specific multicast is not supported on this platform.
     #[error("MCRX: source-specific multicast is not supported on this platform")]
     SourceSpecificMulticastUnsupported,
+
+    /// IPv6 source-specific multicast has not been wired into the receiver yet.
+    #[error("MCRX: IPv6 source-specific multicast is not implemented yet")]
+    Ipv6SourceSpecificMulticastNotYetImplemented,
 
     /// Binding the interface probe socket failed.
     #[error("MCRX: failed to bind interface probe socket: {0}")]

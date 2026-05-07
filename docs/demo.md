@@ -23,6 +23,8 @@ Examples:
 cargo run --bin mcrx_recv -- 239.1.2.3 5000
 cargo run --bin mcrx_recv -- 232.1.2.3 5000 192.168.1.10
 cargo run --bin mcrx_recv -- 232.1.2.3 5000 192.168.1.10 192.168.1.20
+cargo run --bin mcrx_recv -- ff01::1234 5000
+cargo run --bin mcrx_recv -- ff01::1234 5000 ::1
 ```
 
 Argument meaning:
@@ -44,7 +46,12 @@ Examples:
 cargo run --bin mcrx_send -- 239.1.2.3 5000 hello
 cargo run --bin mcrx_send -- 239.1.2.3 5000 hello 1000
 cargo run --bin mcrx_send -- 232.1.2.3 5000 hello 1000 192.168.1.20
+cargo run --bin mcrx_send -- ff01::1234 5000 hello 1000 ::1
+cargo run --bin mcrx_send -- ff01::1234 5000 hello 1000 1
 ```
+
+For IPv6, the optional `interface` argument may be either a local IPv6 address
+or a numeric interface index.
 
 ## Tokio Receiver
 
