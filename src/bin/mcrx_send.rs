@@ -84,7 +84,12 @@ fn prepare_ipv4_sender(
     dst_port: u16,
     interface: Option<InterfaceArg>,
 ) -> Result<(UdpSocket, SocketAddr), String> {
-    let sender = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))
+    let bind_addr = match interface {
+        Some(InterfaceArg::Ip(IpAddr::V4(interface))) => SocketAddrV4::new(interface, 0),
+        _ => SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0),
+    };
+
+    let sender = UdpSocket::bind(bind_addr)
         .map_err(|err| format!("failed to bind IPv4 sender socket: {err}"))?;
 
     sender
@@ -107,7 +112,19 @@ fn prepare_ipv6_sender(
     dst_port: u16,
     interface: Option<InterfaceArg>,
 ) -> Result<(UdpSocket, SocketAddr), String> {
-    let sender = UdpSocket::bind(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0))
+    let bind_addr = match interface {
+        Some(InterfaceArg::Ip(IpAddr::V6(interface))) => {
+            let scope_id = if interface.is_unicast_link_local() {
+                resolve_ipv6_interface_index(interface)?
+            } else {
+                0
+            };
+            SocketAddrV6::new(interface, 0, 0, scope_id)
+        }
+        _ => SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0),
+    };
+
+    let sender = UdpSocket::bind(bind_addr)
         .map_err(|err| format!("failed to bind IPv6 sender socket: {err}"))?;
 
     sender
