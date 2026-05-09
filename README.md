@@ -160,6 +160,53 @@ Metadata inspection receiver:
 ```bash
 cargo run --bin mcrx_recv_meta -- 239.1.2.3 5000
 cargo run --bin mcrx_recv_meta -- ff01::1234 5000 --interface ::1
+cargo run --bin mcrx_recv_meta -- ff31::8000:1234 5000 fd06:ba51:f296:0:1caf:6b66:e6f7:4b10 --interface fd06:ba51:f296:0:1caf:6b66:e6f7:4b10
+```
+
+## IPv6 SSM Notes
+
+For IPv6 SSM, use `ff3x::/32` groups. The `x` nibble is the multicast scope:
+
+- `ff31::/16` → interface-local, good for same-host tests
+- `ff32::/16` → link-local, only for the local L2 link
+- `ff35::/16` → site-local
+- `ff38::/16` → organization-local
+- `ff3e::/16` → global scope
+
+Prefer dynamic SSM group IDs such as `ff31::8000:1234` or `ff3e::8000:1234`.
+
+For receivers:
+
+- the SSM `source` is the sender's IP address
+- the `interface` is the receiver's local join interface
+- on one machine those may be the same
+- across machines they usually differ
+
+For senders:
+
+- when you pass an IPv6 address to `mcrx_send`, the sender binds to that exact
+  local IPv6 address and also selects the corresponding multicast interface
+- this matters for SSM, because the receiver filters on the exact packet source
+- for link-local SSM groups such as `ff32::/16`, send from a link-local
+  `fe80::...` source
+- for wider-scope groups such as `ff35::/16` or `ff3e::/16`, use a ULA or
+  global IPv6 source that is valid on that network
+
+Same-host IPv6 SSM example:
+
+```bash
+cargo run --bin mcrx_recv_meta -- ff31::8000:1234 5000 fd06:ba51:f296:0:1caf:6b66:e6f7:4b10 --interface fd06:ba51:f296:0:1caf:6b66:e6f7:4b10
+cargo run --bin mcrx_send -- ff31::8000:1234 5000 hello-v6 1000 fd06:ba51:f296:0:1caf:6b66:e6f7:4b10
+```
+
+Cross-machine IPv6 SSM example on the same network:
+
+```bash
+# sender host
+cargo run --bin mcrx_send -- ff3e::8000:1234 5000 hello-v6 1000 <sender-ipv6>
+
+# receiver host
+cargo run --bin mcrx_recv_meta -- ff3e::8000:1234 5000 <sender-ipv6> --interface <receiver-ipv6>
 ```
 
 ## Documentation

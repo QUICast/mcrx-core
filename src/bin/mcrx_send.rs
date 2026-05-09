@@ -136,7 +136,7 @@ fn prepare_ipv6_sender(
         .set_multicast_hops_v6(1)
         .map_err(|err| format!("failed to set IPv6 multicast hops: {err}"))?;
 
-    let scope_id = match interface {
+    let interface_index = match interface {
         Some(interface) => {
             let scope_id = resolve_ipv6_interface_arg(interface)?;
             if scope_id != 0 {
@@ -149,9 +149,11 @@ fn prepare_ipv6_sender(
         None => 0,
     };
 
+    let destination_scope_id = multicast_destination_scope_id_v6(group, interface_index);
+
     Ok((
         sender,
-        SocketAddr::V6(SocketAddrV6::new(group, dst_port, 0, scope_id)),
+        SocketAddr::V6(SocketAddrV6::new(group, dst_port, 0, destination_scope_id)),
     ))
 }
 
@@ -214,6 +216,18 @@ fn interface_string(interface: Option<InterfaceArg>) -> String {
         Some(InterfaceArg::Ip(interface)) => interface.to_string(),
         Some(InterfaceArg::V6Index(index)) => format!("ifindex:{index}"),
         None => "default".to_string(),
+    }
+}
+
+fn multicast_destination_scope_id_v6(group: Ipv6Addr, interface_index: u32) -> u32 {
+    if interface_index == 0 {
+        return 0;
+    }
+
+    let scope = group.octets()[1] & 0x0f;
+    match scope {
+        0x1 | 0x2 => interface_index,
+        _ => 0,
     }
 }
 
@@ -363,6 +377,15 @@ fn print_usage(program: &str) {
     eprintln!("  {program} 232.1.2.3 5000 hello 1000 192.168.1.10");
     eprintln!("  {program} ff01::1234 5000 hello 1000 ::1");
     eprintln!("  {program} ff01::1234 5000 hello 1000 1");
+    eprintln!("  {program} ff31::8000:1234 5000 hello 1000 <sender-ipv6>");
+    eprintln!("  {program} ff3e::8000:1234 5000 hello 1000 <sender-ipv6>");
+    eprintln!();
+    eprintln!("Notes:");
+    eprintln!(
+        "  - for IPv6, an address-form interface argument binds the sender to that exact local source IP"
+    );
+    eprintln!("  - for IPv6 SSM, use ff3x::/32 groups such as ff31::8000:1234 or ff3e::8000:1234");
+    eprintln!("  - for link-local IPv6 SSM groups such as ff32::/16, use a fe80:: source");
 }
 
 #[cfg(test)]
@@ -394,5 +417,17 @@ mod tests {
     fn parse_interface_arg_rejects_index_for_ipv4_group() {
         let err = parse_interface_arg(IpAddr::V4(Ipv4Addr::LOCALHOST), "7").unwrap_err();
         assert!(err.contains("expected an IPv4 address"));
+    }
+
+    #[test]
+    fn multicast_destination_scope_id_keeps_ifindex_for_link_scoped_group() {
+        let group: Ipv6Addr = "ff32::8000:1234".parse().unwrap();
+        assert_eq!(multicast_destination_scope_id_v6(group, 16), 16);
+    }
+
+    #[test]
+    fn multicast_destination_scope_id_clears_ifindex_for_global_scoped_group() {
+        let group: Ipv6Addr = "ff3e::8000:1234".parse().unwrap();
+        assert_eq!(multicast_destination_scope_id_v6(group, 16), 0);
     }
 }

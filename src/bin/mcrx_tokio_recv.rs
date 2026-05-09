@@ -147,4 +147,5 @@ fn print_usage(program: &str) {
     eprintln!("  interface  optional local interface address");
     eprintln!("examples:");
     eprintln!("  {program} ff01::1234 5000 --interface ::1");
+    eprintln!("  {program} ff31::8000:1234 5000 <sender-ipv6> --interface <receiver-ipv6>");
 }

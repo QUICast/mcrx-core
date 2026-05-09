@@ -501,6 +501,7 @@ fn print_usage(program: &str) {
     eprintln!("  {program} 232.1.2.3 5000 192.168.1.10 192.168.1.20");
     eprintln!("  {program} ff01::1234 5000");
     eprintln!("  {program} ff01::1234 5000 --interface ::1");
+    eprintln!("  {program} ff31::8000:1234 5000 <sender-ipv6> --interface <receiver-ipv6>");
     eprintln!();
     eprintln!("Notes:");
     eprintln!("  - omit <source> for ASM");
@@ -509,6 +510,8 @@ fn print_usage(program: &str) {
         "  - use --interface for ASM when you want to set the join interface without also setting a source"
     );
     eprintln!("  - <interface> selects the local join interface address");
+    eprintln!("  - for IPv6 SSM, use ff3x::/32 groups such as ff31::8000:1234 or ff3e::8000:1234");
+    eprintln!("  - for link-local IPv6 SSM groups such as ff32::/16, send from a fe80:: source");
 
     #[cfg(feature = "metrics")]
     {

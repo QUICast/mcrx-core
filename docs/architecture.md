@@ -75,5 +75,5 @@ sockets.
 
 - `subscription` → one multicast receive path
 - `context` → orchestration across subscriptions
-- `platform` → socket lifecycle and receive boundary
+- `platform` → socket lifecycle, interface resolution, family-specific join/leave, and receive boundary
 - `tokio_adapter` → optional async wrapper over an extracted subscription

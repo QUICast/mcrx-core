@@ -34,6 +34,56 @@ receive path supports IPv4 and IPv6 ASM/SSM. The metadata-aware receive APIs
 also expose pktinfo-style metadata for both families on platforms that provide
 it.
 
+## IPv6 Group and Interface Guidance
+
+IPv6 multicast is stricter than IPv4 about scope and interface selection.
+
+For IPv6 SSM, use `ff3x::/32` groups:
+
+- `ff31::/16` for interface-local tests on one host
+- `ff32::/16` for link-local tests on one L2 link
+- `ff35::/16` for site-local tests
+- `ff38::/16` for organization-local tests
+- `ff3e::/16` for global scope
+
+Prefer dynamic SSM group IDs such as `ff31::8000:1234` or `ff3e::8000:1234`.
+
+For IPv6 SSM, the two important addresses are:
+
+- `source` → the sender's IP address, which the receiver will admit
+- `interface` → the receiver's local join interface
+
+On one machine they may be the same. Across machines they usually differ.
+
+Example:
+
+```rust
+let mut config = SubscriptionConfig::ssm_v6(group, source, port);
+config.interface = Some(interface.into());
+```
+
+The receiver binaries accept the same split explicitly:
+
+```bash
+cargo run --bin mcrx_recv_meta -- ff3e::8000:1234 5000 <sender-ipv6> --interface <receiver-ipv6>
+```
+
+For IPv6 senders, the demo binary treats an IPv6 interface address as both:
+
+- the local source address to bind to
+- the interface to use for multicast transmission
+
+That behavior is intentional for SSM, because the receiver filters on the exact
+packet source IP. If the sender only chose an interface and let the kernel pick
+another source address, the packet could be dropped by the SSM filter.
+
+One practical rule:
+
+- for link-local multicast groups such as `ff32::/16`, send from a link-local
+  `fe80::...` source
+- for wider-scope groups such as `ff35::/16` or `ff3e::/16`, use a ULA or
+  global IPv6 source that is valid on that network
+
 ## Existing Sockets
 
 When an integration needs to create or bind the socket itself, pass it into the

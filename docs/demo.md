@@ -25,6 +25,7 @@ cargo run --bin mcrx_recv -- 232.1.2.3 5000 192.168.1.10
 cargo run --bin mcrx_recv -- 232.1.2.3 5000 192.168.1.10 192.168.1.20
 cargo run --bin mcrx_recv -- ff01::1234 5000
 cargo run --bin mcrx_recv -- ff01::1234 5000 --interface ::1
+cargo run --bin mcrx_recv -- ff31::8000:1234 5000 fd06:ba51:f296:0:1caf:6b66:e6f7:4b10 --interface fd06:ba51:f296:0:1caf:6b66:e6f7:4b10
 ```
 
 Argument meaning:
@@ -48,10 +49,17 @@ cargo run --bin mcrx_send -- 239.1.2.3 5000 hello 1000
 cargo run --bin mcrx_send -- 232.1.2.3 5000 hello 1000 192.168.1.20
 cargo run --bin mcrx_send -- ff01::1234 5000 hello 1000 ::1
 cargo run --bin mcrx_send -- ff01::1234 5000 hello 1000 1
+cargo run --bin mcrx_send -- ff31::8000:1234 5000 hello 1000 fd06:ba51:f296:0:1caf:6b66:e6f7:4b10
+cargo run --bin mcrx_send -- ff3e::8000:1234 5000 hello 1000 fd06:ba51:f296:0:1caf:6b66:e6f7:4b10
 ```
 
 For IPv6, the optional `interface` argument may be either a local IPv6 address
 or a numeric interface index.
+
+When the IPv6 `interface` argument is an IPv6 address, `mcrx_send` binds the
+socket to that exact local address and also selects the corresponding outgoing
+multicast interface. That is especially important for SSM, because the receive
+side filters on the exact sender source IP.
 
 ## Tokio Receiver
 
@@ -82,6 +90,28 @@ Example:
 ```bash
 cargo run --bin mcrx_recv_meta -- 239.1.2.3 5000
 cargo run --bin mcrx_recv_meta -- ff01::1234 5000 --interface ::1
+cargo run --bin mcrx_recv_meta -- ff3e::8000:1234 5000 <sender-ipv6> --interface <receiver-ipv6>
+```
+
+## IPv6 SSM Tips
+
+- Use `ff3x::/32` groups for IPv6 SSM. Good examples are `ff31::8000:1234`
+  for same-host tests and `ff3e::8000:1234` for cross-machine testing.
+- In receiver commands, `source` means the sender's IP address. `--interface`
+  means the receiver's local join interface.
+- The mixed form `mcrx_recv_meta <group> <port> <source> --interface <iface>`
+  is supported and is often the clearest way to spell IPv6 SSM.
+- `ff32::/16` is link-local scope. If you use it, send from a link-local
+  `fe80::...` address rather than a ULA or global source.
+
+Cross-machine IPv6 SSM example:
+
+```bash
+# sender
+cargo run --bin mcrx_send -- ff3e::8000:1234 5000 hello-v6 1000 <sender-ipv6>
+
+# receiver
+cargo run --bin mcrx_recv_meta -- ff3e::8000:1234 5000 <sender-ipv6> --interface <receiver-ipv6>
 ```
 
 ## Receiver Metrics

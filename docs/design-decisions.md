@@ -72,6 +72,22 @@ For event-loop integration, the library supports two ownership modes:
 This keeps ownership transfer explicit instead of forcing callers to rebuild
 subscription state around a raw socket handle.
 
+## Explicit IPv6 Source and Interface Selection
+
+IPv6 multicast behavior is strongly shaped by scope and interface selection, so
+the library keeps those choices explicit in the public model:
+
+- `SubscriptionConfig::source` identifies the admitted sender for SSM
+- `SubscriptionConfig::interface` identifies the local join interface
+
+Those are deliberately separate because cross-machine IPv6 SSM usually needs
+both values, and they are often different.
+
+The demo sender mirrors that philosophy for IPv6 by binding to the exact local
+IPv6 address passed by the caller, rather than only setting an outgoing
+interface index and leaving source-address selection to the kernel. That makes
+SSM tests and integrations much more predictable.
+
 ## Optional Receive Metadata
 
 The original `Packet` type stays small and stable for callers that only need
