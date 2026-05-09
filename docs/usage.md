@@ -197,6 +197,54 @@ On Unix this waits for socket readiness via Tokio's `AsyncFd`. On other
 platforms it currently falls back to an async sleep-and-poll loop around the
 same non-blocking receive APIs.
 
+## Python Bindings
+
+The repository includes optional Python bindings in the sibling workspace crate
+`mcrx-core-py`.
+
+They are intentionally shaped around Python-side usage rather than mirroring
+every Rust type one-for-one:
+
+- `Context` manages subscriptions
+- `Subscription` exposes `join()`, `leave()`, `recv_nowait()`, and
+  `recv_with_metadata_nowait()`
+- `Packet` and `PacketWithMetadata` expose source, group, port, payload, and
+  receive metadata in Python-friendly objects
+- `AsyncSubscription` and `add_reader()` provide the event-loop layer
+
+Example:
+
+```python
+from mcrx_core import AsyncSubscription, Context
+
+ctx = Context()
+sub = ctx.add_subscription("239.1.2.3", 5000, interface="192.168.1.20")
+sub.join()
+
+packet = sub.recv_nowait()
+
+async_sub = AsyncSubscription(sub)
+packet = await async_sub.recv_with_metadata()
+```
+
+For callback-style integration:
+
+```python
+from mcrx_core import add_reader
+
+handle = add_reader(sub, lambda packet: print(packet.payload))
+```
+
+On selector-based event loops the helper uses `loop.add_reader()` and the
+subscription file descriptor directly. On platforms or loops where that API is
+not available, such as the default Windows asyncio loop, it falls back to a
+small polling task over the same non-blocking receive methods.
+
+The low-level `Subscription.fileno()` method is exposed on Unix so applications
+that want to wire their own selector or callback layer can do that directly.
+
+Build and packaging details live in [Python Bindings](python.md).
+
 ## Optional Receive Metadata
 
 When you need more delivery context than source, group, port, and payload, use

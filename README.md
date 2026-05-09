@@ -19,6 +19,7 @@ receive metadata on platforms that expose it.
 - Caller-provided socket support
 - Event-loop friendly socket borrowing and extraction APIs
 - Optional Tokio adapter via the `tokio` feature
+- Optional Python bindings with an asyncio helper via the sibling `mcrx-core-py` crate
 - Optional receive metadata on platforms that expose it
 - Optional metrics via the `metrics` feature
 
@@ -39,6 +40,19 @@ With optional metrics:
 ```bash
 cargo add mcrx-core --features metrics
 ```
+
+## Python Bindings
+
+Python bindings live in the sibling workspace crate
+[`mcrx-core-py`](mcrx-core-py/README.md).
+
+That split keeps `mcrx-core` as a pure Rust crate while still shipping a
+Python-friendly API with:
+
+- `Context` and `Subscription`
+- packet and receive metadata objects
+- `AsyncSubscription`
+- `add_reader()` for callback-style asyncio integration
 
 ## Quick Start
 
@@ -215,6 +229,7 @@ cargo run --bin mcrx_recv_meta -- ff3e::8000:1234 5000 <sender-ipv6> --interface
 - [Architecture](docs/architecture.md)
 - [Demo Binaries](docs/demo.md)
 - [Metrics](docs/metrics.md)
+- [Python Bindings](docs/python.md)
 - [Design Decisions](docs/design-decisions.md)
 
 ## Platform Support

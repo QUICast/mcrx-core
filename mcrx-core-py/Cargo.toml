@@ -1,0 +1,19 @@
+[package]
+name = "mcrx-core-py"
+version = "0.2.1"
+edition = "2024"
+license = "BSD-2-Clause"
+description = "Python bindings for the mcrx-core multicast receiver library."
+repository = "https://github.com/QUICast/mcrx-core"
+homepage = "https://github.com/QUICast/mcrx-core"
+readme = "README.md"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+mcrx-core = { path = ".." }
+pyo3 = { version = "0.28.3", features = ["extension-module", "abi3-py39"] }
+
+[build-dependencies]
+pyo3-build-config = "0.28.3"
