@@ -98,8 +98,8 @@ non-exhaustive `ReceiveMetadata` struct. That metadata currently includes:
 
 - socket local address
 - configured join interface
-- pktinfo-style destination local IP on supported Unix and Windows IPv4 platforms
-- pktinfo-style ingress interface index on supported Unix and Windows IPv4 platforms
+- pktinfo-style destination local IP on supported Unix and Windows IPv4 and IPv6 platforms
+- pktinfo-style ingress interface index on supported Unix and Windows IPv4 and IPv6 platforms
 
 Where the platform layer does not provide those ancillary messages yet, the
 pktinfo-derived fields remain `None`.

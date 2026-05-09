@@ -223,7 +223,7 @@ cargo run --bin mcrx_recv_meta -- ff3e::8000:1234 5000 <sender-ipv6> --interface
 |---------|-----|-----|------------------------------------------|
 | macOS   | ✅   | ✅   | Verified                                 |
 | Linux   | ✅   | ✅   | Verified                                 |
-| Windows | ✅   | ✅   | Build-checked (`x86_64-pc-windows-msvc`) |
+| Windows | ✅   | ✅   | Verified                                 |
 
 IPv6 ASM/SSM support and pktinfo-style receive metadata are wired into the
 receive path on the same platforms.

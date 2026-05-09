@@ -222,8 +222,8 @@ Today the optional metadata surface exposes:
 
 - the socket's current local bind address
 - the configured join interface from `SubscriptionConfig`
-- pktinfo-style destination local IP on supported Unix and Windows IPv4 platforms
-- pktinfo-style ingress interface index on supported Unix and Windows IPv4 platforms
+- pktinfo-style destination local IP on supported Unix and Windows IPv4 and IPv6 platforms
+- pktinfo-style ingress interface index on supported Unix and Windows IPv4 and IPv6 platforms
 
 On platforms where those ancillary control messages are not wired yet, the
 pktinfo-derived fields remain `None`.
