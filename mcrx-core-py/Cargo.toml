@@ -12,7 +12,7 @@ readme = "README.md"
 crate-type = ["cdylib"]
 
 [dependencies]
-mcrx-core = { path = ".." }
+mcrx-core = { version = "0.2.1", path = ".." }
 pyo3 = { version = "0.28.3", features = ["extension-module", "abi3-py39"] }
 
 [build-dependencies]
