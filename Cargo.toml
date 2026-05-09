@@ -14,7 +14,7 @@ categories = ["network-programming"]
 
 [features]
 default = []
-metrics = []
+metrics = ["dep:serde_json"]
 tokio = ["dep:tokio"]
 
 [dependencies]
@@ -23,6 +23,7 @@ bytes = "1"
 thiserror = "2.0.18"
 libc = "0.2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time", "signal"], optional = true }
+serde_json = { version = "1", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_System_IO"] }

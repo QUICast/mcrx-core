@@ -133,6 +133,18 @@ MCRX_METRICS_SUMMARY_SECS=2
 MCRX_METRICS_SUMMARY_FILE=metrics.jsonl
 ```
 
+`MCRX_METRICS_NODE_ID`
+
+```bash
+MCRX_METRICS_NODE_ID=client-0001
+```
+
+`MCRX_METRICS_FLAGS_JSON`
+
+```bash
+MCRX_METRICS_FLAGS_JSON='{"transport":"quic","experiment":"baseline-a"}'
+```
+
 ### Example usage
 
 Print summaries to the terminal:
@@ -145,6 +157,15 @@ Write summaries to a file:
 
 ```bash
 MCRX_METRICS_SUMMARY_SECS=2 MCRX_METRICS_SUMMARY_FILE=metrics.jsonl cargo run --features metrics --bin mcrx_recv -- 239.1.2.3 5000
+```
+
+Write single-header JSONL with explicit node metadata:
+
+```bash
+MCRX_METRICS_SUMMARY_SECS=2 \
+MCRX_METRICS_SUMMARY_FILE=results/client-0001/network.jsonl \
+MCRX_METRICS_FLAGS_JSON='{"experiment":"baseline-a"}' \
+cargo run --features metrics --bin mcrx_recv -- 239.1.2.3 5000
 ```
 
 ## Notes

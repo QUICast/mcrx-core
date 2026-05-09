@@ -84,10 +84,61 @@ Configured via:
 
 - `MCRX_METRICS_SUMMARY_SECS`
 - `MCRX_METRICS_SUMMARY_FILE`
+- `MCRX_METRICS_NODE_ID`
+- `MCRX_METRICS_FLAGS_JSON`
 
 ## JSONL Schema
 
-The JSONL output now uses explicit names for counter totals and interval deltas.
+Metrics JSONL files use a single-header format:
+
+1. The first non-empty line is a header object.
+2. Every later non-empty line is one compact sample row.
+3. Header metadata is not repeated on sample rows.
+
+Network output uses `artifact_type = "mcrx-network"`.
+
+When hardware metrics are enabled, the sibling `*_hardware` file uses
+`artifact_type = "process-hardware"`.
+
+### Header Row
+
+The header row contains:
+
+- `schema = "heimdall-jsonl-v1"`
+- `artifact_type`
+- `node_id`
+- `producer`
+- `created_at`
+- `flags`
+
+`producer` is currently `mcrx-core/mcrx_recv`.
+
+`node_id` is resolved in this order:
+
+1. `MCRX_METRICS_NODE_ID`, if set
+2. the output file's parent directory name
+3. the output file stem
+
+`flags` is a free-form JSON object. `mcrx_recv` populates it with receiver
+context such as:
+
+- `transport`
+- `role`
+- `multicast_group`
+- `multicast_port`
+- `multicast_interface`
+- `join_mode`
+- `source_filter`
+- `source_addr` when present
+- `batch_receive_enabled`
+
+Additional caller-provided flag fields can be merged in with
+`MCRX_METRICS_FLAGS_JSON`.
+
+### Sample Rows
+
+The network sample rows keep the existing numeric metric fields and use explicit
+names for counter totals and interval deltas.
 
 Packet and byte fields:
 
@@ -118,11 +169,36 @@ Current-state gauge fields remain:
 - `active_subscriptions`
 - `joined_subscriptions`
 
+The header metadata fields are intentionally not repeated on sample rows:
+
+- `schema`
+- `artifact_type`
+- `node_id`
+- `producer`
+- `flags`
+
+Hardware sample rows keep their existing compact numeric fields such as:
+
+- `cpu_user_secs`
+- `cpu_system_secs`
+- `cpu_total_secs`
+- `cpu_util_percent`
+- `rss_bytes`
+- `virtual_memory_bytes`
+- `thread_count`
+- `open_fds`
+- `page_faults_minor`
+- `page_faults_major`
+- `ctx_switches_voluntary`
+- `ctx_switches_involuntary`
+
 ## Breaking Schema Change
 
-For downstream JSONL consumers, the old ambiguous counter keys such as
-`packets_received`, `bytes_received`, `would_block_count`, `receive_errors`,
-`join_count`, `leave_count`, `batch_calls`, and `batch_packets_received` are no
-longer emitted by `mcrx_recv`.
+There is no backward-compatibility layer for the older repeated-metadata JSONL
+shape.
 
-Consumers should switch to the explicit `*_total` and `*_delta` fields.
+Consumers should expect:
+
+- one header object at the top of each file
+- compact sample rows afterward
+- explicit `*_total` and `*_delta` network counter fields

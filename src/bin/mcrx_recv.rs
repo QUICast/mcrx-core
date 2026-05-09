@@ -7,17 +7,19 @@ use mcrx_core::{
     ContextMetricsDelta, ContextMetricsSampler, ContextMetricsSnapshot, HardwareMetricsDelta,
     HardwareMetricsSampler, HardwareMetricsSnapshot,
 };
+#[cfg(feature = "metrics")]
+use serde_json::{Map, Value, json};
 use std::env;
+#[cfg(feature = "metrics")]
+use std::fs;
 #[cfg(feature = "metrics")]
 use std::fs::OpenOptions;
 #[cfg(feature = "metrics")]
 use std::io::Write;
 use std::net::IpAddr;
 #[cfg(feature = "metrics")]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
-#[cfg(feature = "metrics")]
-use std::sync::Once;
 use std::thread;
 use std::time::Duration;
 #[cfg(feature = "metrics")]
@@ -25,6 +27,22 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const MAX_PREVIEW_LEN: usize = 64;
+#[cfg(feature = "metrics")]
+const HEIMDALL_JSONL_SCHEMA: &str = "heimdall-jsonl-v1";
+#[cfg(feature = "metrics")]
+const NETWORK_ARTIFACT_TYPE: &str = "mcrx-network";
+#[cfg(feature = "metrics")]
+const HARDWARE_ARTIFACT_TYPE: &str = "process-hardware";
+#[cfg(feature = "metrics")]
+const RECEIVER_PRODUCER: &str = "mcrx-core/mcrx_recv";
+
+#[cfg(feature = "metrics")]
+#[derive(Debug, Clone)]
+struct MetricsJsonlOutputConfig {
+    network_path: PathBuf,
+    node_id: String,
+    flags: Map<String, Value>,
+}
 
 fn main() {
     if let Err(err) = run() {
@@ -79,7 +97,8 @@ fn run() -> Result<(), String> {
     #[cfg(feature = "metrics")]
     let summary_interval = summary_interval_from_env();
     #[cfg(feature = "metrics")]
-    let summary_file = summary_file_from_env();
+    let summary_output =
+        summary_output_from_env(group, dst_port, source, interface)?;
     #[cfg(feature = "metrics")]
     let mut metrics_sampler = ContextMetricsSampler::new();
     #[cfg(feature = "metrics")]
@@ -117,8 +136,8 @@ fn run() -> Result<(), String> {
             let snapshot = ctx.metrics_snapshot();
 
             if let Some(delta) = metrics_sampler.sample(snapshot.clone()) {
-                if let Some(path) = &summary_file {
-                    write_metrics_summary_jsonl(&snapshot, &delta, path)
+                if let Some(output) = &summary_output {
+                    write_metrics_summary_jsonl(&snapshot, &delta, output)
                         .map_err(|err| format!("failed to write metrics summary: {err}"))?;
                 } else {
                     print_metrics_summary(&snapshot, &delta);
@@ -129,8 +148,8 @@ fn run() -> Result<(), String> {
                 && let Some(hardware_snapshot) = capture_hardware_metrics_snapshot()?
             {
                 if let Some(delta) = hardware_sampler.sample(hardware_snapshot.clone()) {
-                    if let Some(path) = &summary_file {
-                        write_hardware_metrics_summary_jsonl(&hardware_snapshot, &delta, path)
+                    if let Some(output) = &summary_output {
+                        write_hardware_metrics_summary_jsonl(&hardware_snapshot, &delta, output)
                             .map_err(|err| {
                                 format!("failed to write hardware metrics summary: {err}")
                             })?;
@@ -211,6 +230,133 @@ fn summary_file_from_env() -> Option<PathBuf> {
 }
 
 #[cfg(feature = "metrics")]
+fn hardware_summary_file_path(network_path: &PathBuf) -> PathBuf {
+    let parent = network_path.parent().map(PathBuf::from).unwrap_or_default();
+    let stem = network_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("metrics");
+    let extension = network_path.extension().and_then(|ext| ext.to_str());
+
+    let file_name = match extension {
+        Some(ext) if !ext.is_empty() => format!("{stem}_hardware.{ext}"),
+        _ => format!("{stem}_hardware"),
+    };
+
+    parent.join(file_name)
+}
+
+#[cfg(feature = "metrics")]
+fn infer_node_id_from_path(path: &Path) -> String {
+    path.parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .filter(|stem| !stem.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+#[cfg(feature = "metrics")]
+fn metrics_node_id_from_env() -> Option<String> {
+    env::var("MCRX_METRICS_NODE_ID")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+#[cfg(feature = "metrics")]
+fn metrics_flags_from_env() -> Result<Map<String, Value>, String> {
+    let raw = match env::var("MCRX_METRICS_FLAGS_JSON") {
+        Ok(raw) => raw,
+        Err(_) => return Ok(Map::new()),
+    };
+
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(Map::new());
+    }
+
+    let parsed: Value = serde_json::from_str(trimmed)
+        .map_err(|err| format!("MCRX_METRICS_FLAGS_JSON must be valid JSON: {err}"))?;
+
+    match parsed {
+        Value::Object(map) => Ok(map),
+        _ => Err("MCRX_METRICS_FLAGS_JSON must be a JSON object".to_string()),
+    }
+}
+
+#[cfg(feature = "metrics")]
+fn build_receiver_metrics_flags(
+    group: IpAddr,
+    dst_port: u16,
+    source: Option<IpAddr>,
+    interface: Option<IpAddr>,
+) -> Result<Map<String, Value>, String> {
+    let mut flags = Map::new();
+    flags.insert("transport".to_string(), Value::String("udp-multicast".to_string()));
+    flags.insert("role".to_string(), Value::String("receiver".to_string()));
+    flags.insert(
+        "multicast_group".to_string(),
+        Value::String(group.to_string()),
+    );
+    flags.insert("multicast_port".to_string(), json!(dst_port));
+    flags.insert(
+        "multicast_interface".to_string(),
+        Value::String(interface_string(interface)),
+    );
+    flags.insert(
+        "join_mode".to_string(),
+        Value::String(if source.is_some() { "ssm" } else { "asm" }.to_string()),
+    );
+    flags.insert(
+        "source_filter".to_string(),
+        Value::String(
+            if source.is_some() {
+                "source-specific"
+            } else {
+                "any"
+            }
+            .to_string(),
+        ),
+    );
+    flags.insert("batch_receive_enabled".to_string(), Value::Bool(false));
+
+    if let Some(source) = source {
+        flags.insert("source_addr".to_string(), Value::String(source.to_string()));
+    }
+
+    for (key, value) in metrics_flags_from_env()? {
+        flags.entry(key).or_insert(value);
+    }
+
+    Ok(flags)
+}
+
+#[cfg(feature = "metrics")]
+fn summary_output_from_env(
+    group: IpAddr,
+    dst_port: u16,
+    source: Option<IpAddr>,
+    interface: Option<IpAddr>,
+) -> Result<Option<MetricsJsonlOutputConfig>, String> {
+    let Some(network_path) = summary_file_from_env() else {
+        return Ok(None);
+    };
+
+    Ok(Some(MetricsJsonlOutputConfig {
+        node_id: metrics_node_id_from_env().unwrap_or_else(|| infer_node_id_from_path(&network_path)),
+        flags: build_receiver_metrics_flags(group, dst_port, source, interface)?,
+        network_path,
+    }))
+}
+
+#[cfg(feature = "metrics")]
 fn init_hardware_metrics_sampler() -> Result<Option<HardwareMetricsSampler>, String> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
@@ -244,23 +390,6 @@ fn capture_hardware_metrics_snapshot() -> Result<Option<HardwareMetricsSnapshot>
 }
 
 #[cfg(feature = "metrics")]
-fn hardware_summary_file_path(network_path: &PathBuf) -> PathBuf {
-    let parent = network_path.parent().map(PathBuf::from).unwrap_or_default();
-    let stem = network_path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("metrics");
-    let extension = network_path.extension().and_then(|ext| ext.to_str());
-
-    let file_name = match extension {
-        Some(ext) if !ext.is_empty() => format!("{stem}_hardware.{ext}"),
-        _ => format!("{stem}_hardware"),
-    };
-
-    parent.join(file_name)
-}
-
-#[cfg(feature = "metrics")]
 fn unix_timestamp_secs(time: SystemTime) -> f64 {
     time.duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs_f64())
@@ -268,141 +397,158 @@ fn unix_timestamp_secs(time: SystemTime) -> f64 {
 }
 
 #[cfg(feature = "metrics")]
+fn header_json(
+    artifact_type: &'static str,
+    producer: &'static str,
+    node_id: &str,
+    created_at: SystemTime,
+    flags: &Map<String, Value>,
+) -> Value {
+    json!({
+        "schema": HEIMDALL_JSONL_SCHEMA,
+        "artifact_type": artifact_type,
+        "node_id": node_id,
+        "producer": producer,
+        "created_at": unix_timestamp_secs(created_at),
+        "flags": Value::Object(flags.clone()),
+    })
+}
+
+#[cfg(feature = "metrics")]
+fn first_non_empty_line(path: &Path) -> Result<Option<String>, std::io::Error> {
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err),
+    };
+
+    Ok(contents
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .map(str::to_string))
+}
+
+#[cfg(feature = "metrics")]
+fn ensure_single_header(path: &Path, header: &Value) -> Result<(), std::io::Error> {
+    match first_non_empty_line(path)? {
+        Some(line) => {
+            let parsed: Value = serde_json::from_str(&line).map_err(|err| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("existing JSONL header is invalid JSON: {err}"),
+                )
+            })?;
+
+            let schema = parsed.get("schema").and_then(Value::as_str);
+            let artifact_type = parsed.get("artifact_type").and_then(Value::as_str);
+            if schema != Some(HEIMDALL_JSONL_SCHEMA) || artifact_type.is_none() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "existing JSONL file does not start with a Heimdall header object",
+                ));
+            }
+
+            Ok(())
+        }
+        None => {
+            let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+            serde_json::to_writer(&mut file, header)
+                .map_err(std::io::Error::other)?;
+            file.write_all(b"\n")?;
+            Ok(())
+        }
+    }
+}
+
+#[cfg(feature = "metrics")]
+fn append_jsonl_sample_row(
+    path: &Path,
+    header: &Value,
+    sample: &Value,
+) -> Result<(), std::io::Error> {
+    ensure_single_header(path, header)?;
+
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    serde_json::to_writer(&mut file, sample).map_err(std::io::Error::other)?;
+    file.write_all(b"\n")?;
+    Ok(())
+}
+
+#[cfg(feature = "metrics")]
 fn write_metrics_summary_jsonl(
     snapshot: &ContextMetricsSnapshot,
     delta: &ContextMetricsDelta,
-    path: &PathBuf,
+    output: &MetricsJsonlOutputConfig,
 ) -> Result<(), std::io::Error> {
-    let timestamp_secs = unix_timestamp_secs(snapshot.captured_at);
-
-    static INIT: Once = Once::new();
-    INIT.call_once(|| {
-        let _ = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(path);
+    let header = header_json(
+        NETWORK_ARTIFACT_TYPE,
+        RECEIVER_PRODUCER,
+        &output.node_id,
+        snapshot.captured_at,
+        &output.flags,
+    );
+    let sample = json!({
+        "ts": unix_timestamp_secs(snapshot.captured_at),
+        "interval_secs": delta.interval_secs,
+        "active_subscriptions": snapshot.active_subscriptions,
+        "joined_subscriptions": snapshot.joined_subscriptions,
+        "packets_received_total": snapshot.total_packets_received,
+        "bytes_received_total": snapshot.total_bytes_received,
+        "packets_received_delta": delta.packets_received,
+        "bytes_received_delta": delta.bytes_received,
+        "would_block_count_total": snapshot.total_would_block_count,
+        "would_block_count_delta": delta.would_block_count,
+        "receive_errors_total": snapshot.total_receive_errors,
+        "receive_errors_delta": delta.receive_errors,
+        "join_count_total": snapshot.total_join_count,
+        "join_count_delta": delta.join_count,
+        "leave_count_total": snapshot.total_leave_count,
+        "leave_count_delta": delta.leave_count,
+        "batch_calls_total": snapshot.batch_calls,
+        "batch_calls_delta": delta.batch_calls,
+        "batch_packets_received_total": snapshot.batch_packets_received,
+        "batch_packets_received_delta": delta.batch_packets_received,
+        "packets_per_sec": delta.packets_per_sec(),
+        "bytes_per_sec": delta.bytes_per_sec(),
+        "would_block_per_sec": delta.would_block_per_sec(),
+        "receive_errors_per_sec": delta.receive_errors_per_sec(),
     });
 
-    let line = format!(
-        concat!(
-            "{{",
-            "\"ts\":{},",
-            "\"interval_secs\":{},",
-            "\"active_subscriptions\":{},",
-            "\"joined_subscriptions\":{},",
-            "\"packets_received_total\":{},",
-            "\"bytes_received_total\":{},",
-            "\"packets_received_delta\":{},",
-            "\"bytes_received_delta\":{},",
-            "\"would_block_count_total\":{},",
-            "\"would_block_count_delta\":{},",
-            "\"receive_errors_total\":{},",
-            "\"receive_errors_delta\":{},",
-            "\"join_count_total\":{},",
-            "\"join_count_delta\":{},",
-            "\"leave_count_total\":{},",
-            "\"leave_count_delta\":{},",
-            "\"batch_calls_total\":{},",
-            "\"batch_calls_delta\":{},",
-            "\"batch_packets_received_total\":{},",
-            "\"batch_packets_received_delta\":{},",
-            "\"packets_per_sec\":{},",
-            "\"bytes_per_sec\":{},",
-            "\"would_block_per_sec\":{},",
-            "\"receive_errors_per_sec\":{}",
-            "}}\n"
-        ),
-        timestamp_secs,
-        delta.interval_secs,
-        snapshot.active_subscriptions,
-        snapshot.joined_subscriptions,
-        snapshot.total_packets_received,
-        snapshot.total_bytes_received,
-        delta.packets_received,
-        delta.bytes_received,
-        snapshot.total_would_block_count,
-        delta.would_block_count,
-        snapshot.total_receive_errors,
-        delta.receive_errors,
-        snapshot.total_join_count,
-        delta.join_count,
-        snapshot.total_leave_count,
-        delta.leave_count,
-        snapshot.batch_calls,
-        delta.batch_calls,
-        snapshot.batch_packets_received,
-        delta.batch_packets_received,
-        delta.packets_per_sec(),
-        delta.bytes_per_sec(),
-        delta.would_block_per_sec(),
-        delta.receive_errors_per_sec(),
-    );
-
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    file.write_all(line.as_bytes())?;
-    Ok(())
+    append_jsonl_sample_row(&output.network_path, &header, &sample)
 }
 
 #[cfg(feature = "metrics")]
 fn write_hardware_metrics_summary_jsonl(
     snapshot: &HardwareMetricsSnapshot,
     delta: &HardwareMetricsDelta,
-    network_path: &PathBuf,
+    output: &MetricsJsonlOutputConfig,
 ) -> Result<(), std::io::Error> {
-    let timestamp_secs = unix_timestamp_secs(snapshot.captured_at);
-    let hardware_path = hardware_summary_file_path(network_path);
-
-    static INIT: Once = Once::new();
-    INIT.call_once(|| {
-        let _ = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&hardware_path);
+    let hardware_path = hardware_summary_file_path(&output.network_path);
+    let header = header_json(
+        HARDWARE_ARTIFACT_TYPE,
+        RECEIVER_PRODUCER,
+        &output.node_id,
+        snapshot.captured_at,
+        &output.flags,
+    );
+    let sample = json!({
+        "ts": unix_timestamp_secs(snapshot.captured_at),
+        "interval_secs": delta.interval_secs,
+        "cpu_user_secs": delta.cpu_user_secs,
+        "cpu_system_secs": delta.cpu_system_secs,
+        "cpu_total_secs": delta.cpu_total_secs,
+        "cpu_util_percent": delta.cpu_util_percent,
+        "rss_bytes": delta.rss_bytes,
+        "virtual_memory_bytes": delta.virtual_memory_bytes,
+        "thread_count": delta.thread_count,
+        "open_fds": delta.open_fds,
+        "page_faults_minor": delta.page_faults_minor,
+        "page_faults_major": delta.page_faults_major,
+        "ctx_switches_voluntary": delta.ctx_switches_voluntary,
+        "ctx_switches_involuntary": delta.ctx_switches_involuntary,
     });
 
-    let line = format!(
-        concat!(
-            "{{",
-            "\"ts\":{},",
-            "\"interval_secs\":{},",
-            "\"cpu_user_secs\":{},",
-            "\"cpu_system_secs\":{},",
-            "\"cpu_total_secs\":{},",
-            "\"cpu_util_percent\":{},",
-            "\"rss_bytes\":{},",
-            "\"virtual_memory_bytes\":{},",
-            "\"thread_count\":{},",
-            "\"open_fds\":{},",
-            "\"page_faults_minor\":{},",
-            "\"page_faults_major\":{},",
-            "\"ctx_switches_voluntary\":{},",
-            "\"ctx_switches_involuntary\":{}",
-            "}}\n"
-        ),
-        timestamp_secs,
-        delta.interval_secs,
-        delta.cpu_user_secs,
-        delta.cpu_system_secs,
-        delta.cpu_total_secs,
-        delta.cpu_util_percent,
-        delta.rss_bytes,
-        delta.virtual_memory_bytes,
-        delta.thread_count,
-        delta.open_fds,
-        delta.page_faults_minor,
-        delta.page_faults_major,
-        delta.ctx_switches_voluntary,
-        delta.ctx_switches_involuntary,
-    );
-
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(hardware_path)?;
-    file.write_all(line.as_bytes())?;
-    Ok(())
+    append_jsonl_sample_row(&hardware_path, &header, &sample)
 }
 
 #[cfg(feature = "metrics")]
@@ -518,13 +664,15 @@ fn print_usage(program: &str) {
         eprintln!();
         eprintln!("Metrics (when built with --features metrics):");
         eprintln!("  MCRX_METRICS_SUMMARY_SECS=<n>   emit a delta metrics summary every n seconds");
+        eprintln!("  MCRX_METRICS_NODE_ID=<id>       override JSONL header node_id (defaults to parent dir, then file stem)");
+        eprintln!("  MCRX_METRICS_FLAGS_JSON=<json>  merge extra JSON object fields into the header flags map");
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         eprintln!(
-            "  MCRX_METRICS_SUMMARY_FILE=<p>   write network metrics with explicit *_total and *_delta fields to <p> and hardware metrics to a sibling *_hardware file"
+            "  MCRX_METRICS_SUMMARY_FILE=<p>   write single-header JSONL network metrics to <p> and process hardware metrics to a sibling *_hardware file"
         );
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         eprintln!(
-            "  MCRX_METRICS_SUMMARY_FILE=<p>   write network metrics with explicit *_total and *_delta fields to <p>"
+            "  MCRX_METRICS_SUMMARY_FILE=<p>   write single-header JSONL network metrics to <p>"
         );
     }
 }
@@ -535,17 +683,29 @@ mod tests {
     use std::fs;
     use std::time::{Duration, SystemTime};
 
-    fn unique_temp_path(name: &str) -> PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or(Duration::ZERO)
-            .as_nanos();
-        std::env::temp_dir().join(format!("mcrx_recv_{name}_{unique}.jsonl"))
-    }
-
     #[test]
-    fn metrics_jsonl_uses_explicit_total_and_delta_field_names() {
-        let path = unique_temp_path("metrics_schema");
+    fn metrics_jsonl_writes_one_header_then_compact_samples() {
+        let parent_name = format!(
+            "mcrx_recv_metrics_node_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or(Duration::ZERO)
+                .as_nanos()
+        );
+        let parent = std::env::temp_dir().join(&parent_name);
+        fs::create_dir_all(&parent).unwrap();
+        let path = parent.join("network_metrics.jsonl");
+        let mut flags = Map::new();
+        flags.insert("role".to_string(), Value::String("receiver".to_string()));
+        flags.insert(
+            "multicast_group".to_string(),
+            Value::String("ff3e::8000:1234".to_string()),
+        );
+        let output = MetricsJsonlOutputConfig {
+            node_id: infer_node_id_from_path(&path),
+            flags,
+            network_path: path.clone(),
+        };
 
         let snapshot = ContextMetricsSnapshot {
             subscriptions_added: 1,
@@ -575,35 +735,91 @@ mod tests {
             batch_packets_received: 5,
         };
 
-        write_metrics_summary_jsonl(&snapshot, &delta, &path).unwrap();
+        write_metrics_summary_jsonl(&snapshot, &delta, &output).unwrap();
 
-        let line = fs::read_to_string(&path).unwrap();
+        let later_snapshot = ContextMetricsSnapshot {
+            total_packets_received: 15,
+            total_bytes_received: 1600,
+            total_would_block_count: 5,
+            total_receive_errors: 2,
+            total_join_count: 3,
+            total_leave_count: 1,
+            batch_calls: 8,
+            batch_packets_received: 15,
+            captured_at: SystemTime::UNIX_EPOCH + Duration::from_secs(125),
+            ..snapshot.clone()
+        };
+        let later_delta = ContextMetricsDelta {
+            interval_secs: 2.0,
+            packets_received: 5,
+            bytes_received: 600,
+            would_block_count: 1,
+            receive_errors: 0,
+            join_count: 0,
+            leave_count: 0,
+            batch_calls: 1,
+            batch_packets_received: 5,
+        };
 
-        assert!(line.contains("\"packets_received_total\":10"));
-        assert!(line.contains("\"bytes_received_total\":1000"));
-        assert!(line.contains("\"packets_received_delta\":5"));
-        assert!(line.contains("\"bytes_received_delta\":600"));
-        assert!(line.contains("\"would_block_count_total\":4"));
-        assert!(line.contains("\"would_block_count_delta\":1"));
-        assert!(line.contains("\"receive_errors_total\":2"));
-        assert!(line.contains("\"receive_errors_delta\":1"));
-        assert!(line.contains("\"join_count_total\":3"));
-        assert!(line.contains("\"join_count_delta\":1"));
-        assert!(line.contains("\"leave_count_total\":1"));
-        assert!(line.contains("\"leave_count_delta\":0"));
-        assert!(line.contains("\"batch_calls_total\":7"));
-        assert!(line.contains("\"batch_calls_delta\":2"));
-        assert!(line.contains("\"batch_packets_received_total\":10"));
-        assert!(line.contains("\"batch_packets_received_delta\":5"));
-        assert!(!line.contains("\"packets_received\":"));
-        assert!(!line.contains("\"bytes_received\":"));
-        assert!(!line.contains("\"would_block_count\":"));
-        assert!(!line.contains("\"receive_errors\":"));
-        assert!(!line.contains("\"join_count\":"));
-        assert!(!line.contains("\"leave_count\":"));
-        assert!(!line.contains("\"batch_calls\":"));
-        assert!(!line.contains("\"batch_packets_received\":"));
+        write_metrics_summary_jsonl(&later_snapshot, &later_delta, &output).unwrap();
 
-        let _ = fs::remove_file(path);
+        let contents = fs::read_to_string(&path).unwrap();
+        let lines = contents
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect::<Vec<_>>();
+
+        assert_eq!(lines.len(), 3);
+
+        let header: Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(header["schema"], HEIMDALL_JSONL_SCHEMA);
+        assert_eq!(header["artifact_type"], NETWORK_ARTIFACT_TYPE);
+        assert_eq!(header["producer"], RECEIVER_PRODUCER);
+        assert_eq!(header["node_id"], parent_name);
+        assert!(header["flags"].is_object());
+
+        for sample_line in &lines[1..] {
+            let sample: Value = serde_json::from_str(sample_line).unwrap();
+            assert!(sample.get("schema").is_none());
+            assert!(sample.get("artifact_type").is_none());
+            assert!(sample.get("node_id").is_none());
+            assert!(sample.get("producer").is_none());
+            assert!(sample.get("flags").is_none());
+        }
+
+        let sample = &lines[1];
+        assert!(sample.contains("\"packets_received_total\":10"));
+        assert!(sample.contains("\"bytes_received_total\":1000"));
+        assert!(sample.contains("\"packets_received_delta\":5"));
+        assert!(sample.contains("\"bytes_received_delta\":600"));
+        assert!(sample.contains("\"would_block_count_total\":4"));
+        assert!(sample.contains("\"would_block_count_delta\":1"));
+        assert!(sample.contains("\"receive_errors_total\":2"));
+        assert!(sample.contains("\"receive_errors_delta\":1"));
+        assert!(sample.contains("\"join_count_total\":3"));
+        assert!(sample.contains("\"join_count_delta\":1"));
+        assert!(sample.contains("\"leave_count_total\":1"));
+        assert!(sample.contains("\"leave_count_delta\":0"));
+        assert!(sample.contains("\"batch_calls_total\":7"));
+        assert!(sample.contains("\"batch_calls_delta\":2"));
+        assert!(sample.contains("\"batch_packets_received_total\":10"));
+        assert!(sample.contains("\"batch_packets_received_delta\":5"));
+        assert!(!sample.contains("\"packets_received\":"));
+        assert!(!sample.contains("\"bytes_received\":"));
+        assert!(!sample.contains("\"would_block_count\":"));
+        assert!(!sample.contains("\"receive_errors\":"));
+        assert!(!sample.contains("\"join_count\":"));
+        assert!(!sample.contains("\"leave_count\":"));
+        assert!(!sample.contains("\"batch_calls\":"));
+        assert!(!sample.contains("\"batch_packets_received\":"));
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir(parent);
+    }
+
+    #[test]
+    fn node_id_inference_prefers_parent_dir_over_file_stem() {
+        let path = PathBuf::from("/tmp/client-0001/network-metrics.jsonl");
+        assert_eq!(infer_node_id_from_path(&path), "client-0001");
     }
 }
