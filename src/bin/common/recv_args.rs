@@ -43,16 +43,16 @@ fn parse_flag_args(remainder: &[String]) -> Result<(Option<IpAddr>, Option<IpAdd
     while index < remainder.len() {
         match remainder[index].as_str() {
             "--source" => {
-                let value = remainder.get(index + 1).ok_or_else(|| {
-                    "missing value after --source".to_string()
-                })?;
+                let value = remainder
+                    .get(index + 1)
+                    .ok_or_else(|| "missing value after --source".to_string())?;
                 source = Some(parse_ip("source", value)?);
                 index += 2;
             }
             "--interface" => {
-                let value = remainder.get(index + 1).ok_or_else(|| {
-                    "missing value after --interface".to_string()
-                })?;
+                let value = remainder
+                    .get(index + 1)
+                    .ok_or_else(|| "missing value after --interface".to_string())?;
                 interface = Some(parse_ip("interface", value)?);
                 index += 2;
             }
@@ -118,17 +118,14 @@ mod tests {
 
     #[test]
     fn parses_flagged_interface_for_ipv6_asm() {
-        let args = argv(&[
-            "mcrx-recv-meta",
-            "ff01::1234",
-            "5000",
-            "--interface",
-            "::1",
-        ]);
+        let args = argv(&["mcrx-recv-meta", "ff01::1234", "5000", "--interface", "::1"]);
 
         let parsed = parse_receive_cli_args(&args).unwrap();
 
-        assert_eq!(parsed.group, IpAddr::V6("ff01::1234".parse::<Ipv6Addr>().unwrap()));
+        assert_eq!(
+            parsed.group,
+            IpAddr::V6("ff01::1234".parse::<Ipv6Addr>().unwrap())
+        );
         assert_eq!(parsed.dst_port, 5000);
         assert_eq!(parsed.source, None);
         assert_eq!(parsed.interface, Some(IpAddr::V6(Ipv6Addr::LOCALHOST)));

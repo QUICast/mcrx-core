@@ -1,19 +1,18 @@
 # mcrx-core
 
 `mcrx-core` is a runtime-agnostic and portable multicast receiver library for
-IPv4 ASM/SSM and IPv6 ASM.
+IPv4 and IPv6 ASM/SSM.
 
 It is built for applications and integrations that want a small multicast
 receive core with explicit lifecycle and socket ownership control.
 
-The receive path now supports IPv4 ASM/SSM and IPv6 ASM, including
-pktinfo-style receive metadata on platforms that expose it. IPv6 SSM is still
-pending.
+The receive path supports IPv4 and IPv6 ASM/SSM, including pktinfo-style
+receive metadata on platforms that expose it.
 
 ## Highlights
 
 - IPv4 ASM and SSM receive support
-- IPv6 ASM receive support
+- IPv6 ASM and SSM receive support
 - Non-blocking receive API
 - Explicit subscription lifecycle: `add`, `join`, `leave`, `remove`
 - Multiple concurrent subscriptions with fair receive across them
@@ -179,8 +178,8 @@ cargo run --bin mcrx_recv_meta -- ff01::1234 5000 --interface ::1
 | Linux   | ✅   | ✅   | Verified                                 |
 | Windows | ✅   | ✅   | Build-checked (`x86_64-pc-windows-msvc`) |
 
-IPv6 ASM support and pktinfo-style receive metadata are wired into the receive
-path on the same platforms. IPv6 SSM is not implemented yet.
+IPv6 ASM/SSM support and pktinfo-style receive metadata are wired into the
+receive path on the same platforms.
 
 ## Compatibility
 

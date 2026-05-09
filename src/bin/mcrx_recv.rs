@@ -505,7 +505,9 @@ fn print_usage(program: &str) {
     eprintln!("Notes:");
     eprintln!("  - omit <source> for ASM");
     eprintln!("  - provide <source> for SSM");
-    eprintln!("  - use --interface for ASM when you want to set the join interface without also setting a source");
+    eprintln!(
+        "  - use --interface for ASM when you want to set the join interface without also setting a source"
+    );
     eprintln!("  - <interface> selects the local join interface address");
 
     #[cfg(feature = "metrics")]

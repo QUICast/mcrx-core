@@ -364,8 +364,9 @@ mod tests {
     use crate::config::{SourceFilter, SubscriptionConfig};
     use crate::platform;
     use crate::test_support::{
-        ipv6_group_socket_addr, make_multicast_sender, make_multicast_sender_v6, sample_config,
-        sample_config_v6,
+        ipv6_group_socket_addr, make_multicast_sender, make_multicast_sender_v6,
+        make_multicast_sender_v6_for_source, sample_config, sample_config_v6,
+        sample_ssm_receive_config_v6,
     };
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6, UdpSocket};
     use std::time::{Duration, Instant};
@@ -633,6 +634,40 @@ mod tests {
         assert_eq!(&packet.payload[..], payload);
         assert_eq!(packet.source.port(), sender_port);
         assert_eq!(packet.source.ip(), IpAddr::V4(interface));
+    }
+
+    #[test]
+    fn try_recv_receives_ipv6_ssm_packet_from_allowed_source() {
+        let Some(config) = sample_ssm_receive_config_v6(55040) else {
+            return;
+        };
+        let interface = match config.source_addr().unwrap() {
+            IpAddr::V6(source) => source,
+            IpAddr::V4(_) => panic!("expected an IPv6 source for IPv6 SSM test"),
+        };
+        let socket = platform::open_bound_socket(&config).unwrap();
+        let mut subscription =
+            Subscription::from_receive_socket(SubscriptionId(1), config.clone(), socket);
+        platform::join_multicast_group(subscription.socket(), subscription.config()).unwrap();
+        subscription.mark_joined().unwrap();
+
+        let sender = make_multicast_sender_v6_for_source(interface);
+        let sender_port = sender.local_addr().unwrap().port();
+        let payload = b"hello real ipv6 ssm multicast";
+
+        sender
+            .send_to(payload, ipv6_group_socket_addr(&config))
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let packet = recv_next_subscription_packet(&subscription, deadline);
+
+        assert_eq!(packet.subscription_id, SubscriptionId(1));
+        assert_eq!(packet.group, config.group);
+        assert_eq!(packet.dst_port, config.dst_port);
+        assert_eq!(&packet.payload[..], payload);
+        assert_eq!(packet.source.port(), sender_port);
+        assert_eq!(packet.source.ip(), IpAddr::V6(interface));
     }
 
     #[test]

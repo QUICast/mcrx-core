@@ -760,8 +760,8 @@ impl ContextMetricsSampler {
 #[cfg(all(test, feature = "metrics"))]
 mod tests {
     use super::*;
-    use crate::SubscriptionConfig;
     use crate::Context;
+    use crate::SubscriptionConfig;
     use crate::test_support::{make_multicast_sender, recv_next_packet, sample_config};
 
     use std::net::SocketAddrV4;
@@ -1020,7 +1020,10 @@ mod tests {
 
         let payload = b"metrics-packet";
         sender
-            .send_to(payload, SocketAddrV4::new(ipv4_group(&config), config.dst_port))
+            .send_to(
+                payload,
+                SocketAddrV4::new(ipv4_group(&config), config.dst_port),
+            )
             .unwrap();
 
         let deadline = Instant::now() + Duration::from_secs(1);
@@ -1050,7 +1053,10 @@ mod tests {
 
         let payload = b"lifetime-metrics";
         sender
-            .send_to(payload, SocketAddrV4::new(ipv4_group(&config), config.dst_port))
+            .send_to(
+                payload,
+                SocketAddrV4::new(ipv4_group(&config), config.dst_port),
+            )
             .unwrap();
 
         let deadline = Instant::now() + Duration::from_secs(1);
@@ -1084,7 +1090,10 @@ mod tests {
 
         let payload = b"delta-metrics";
         sender
-            .send_to(payload, SocketAddrV4::new(ipv4_group(&config), config.dst_port))
+            .send_to(
+                payload,
+                SocketAddrV4::new(ipv4_group(&config), config.dst_port),
+            )
             .unwrap();
 
         let deadline = Instant::now() + Duration::from_secs(1);

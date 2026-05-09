@@ -565,22 +565,13 @@ mod tests {
         let sender = make_multicast_sender();
 
         sender
-            .send_to(
-                b"first-1",
-                ipv4_group_socket_addr(first_config),
-            )
+            .send_to(b"first-1", ipv4_group_socket_addr(first_config))
             .unwrap();
         sender
-            .send_to(
-                b"second-1",
-                ipv4_group_socket_addr(second_config),
-            )
+            .send_to(b"second-1", ipv4_group_socket_addr(second_config))
             .unwrap();
         sender
-            .send_to(
-                b"first-2",
-                ipv4_group_socket_addr(first_config),
-            )
+            .send_to(b"first-2", ipv4_group_socket_addr(first_config))
             .unwrap();
     }
 
@@ -948,7 +939,10 @@ mod tests {
         };
 
         assert_eq!(packet.packet.subscription_id, id);
-        assert_eq!(packet.packet.group, std::net::IpAddr::V4(ipv4_group(&config)));
+        assert_eq!(
+            packet.packet.group,
+            std::net::IpAddr::V4(ipv4_group(&config))
+        );
         assert_eq!(packet.packet.dst_port, config.dst_port);
         assert_eq!(&packet.packet.payload[..], payload);
         assert_pktinfo_metadata(&packet, std::net::IpAddr::V4(ipv4_group(&config)));

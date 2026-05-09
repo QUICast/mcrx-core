@@ -61,8 +61,7 @@ impl SubscriptionConfig {
             return Err(McrxError::InvalidMulticastGroup);
         }
 
-        if let SourceFilter::Source(source) = self.source
-        {
+        if let SourceFilter::Source(source) = self.source {
             if source.is_multicast() {
                 return Err(McrxError::InvalidSourceAddress);
             }

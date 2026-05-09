@@ -20,11 +20,11 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
 };
 #[cfg(windows)]
 use windows_sys::Win32::Networking::WinSock::{
-    AF_INET6, AF_UNSPEC, CMSGHDR, IN_ADDR, IN6_ADDR, IN6_PKTINFO, IN_PKTINFO, IPPROTO_IP,
-    IPPROTO_IPV6, IP_PKTINFO, IPV6_PKTINFO, LPFN_WSARECVMSG,
-    LPWSAOVERLAPPED_COMPLETION_ROUTINE, SIO_GET_EXTENSION_FUNCTION_POINTER, SOCKADDR, SOCKET,
-    SOCKADDR_IN6, SOCKET_ERROR, WSABUF, WSAGetLastError, WSAID_WSARECVMSG, WSAIoctl, WSAMSG,
-    setsockopt,
+    AF_INET6, AF_UNSPEC, CMSGHDR, GROUP_SOURCE_REQ, IN_ADDR, IN_PKTINFO, IN6_ADDR, IN6_ADDR_0,
+    IN6_PKTINFO, IP_PKTINFO, IPPROTO_IP, IPPROTO_IPV6, IPV6_PKTINFO, LPFN_WSARECVMSG,
+    LPWSAOVERLAPPED_COMPLETION_ROUTINE, MCAST_JOIN_SOURCE_GROUP, MCAST_LEAVE_SOURCE_GROUP,
+    SIO_GET_EXTENSION_FUNCTION_POINTER, SOCKADDR, SOCKADDR_IN6, SOCKADDR_STORAGE, SOCKET,
+    SOCKET_ERROR, WSABUF, WSAGetLastError, WSAID_WSARECVMSG, WSAIoctl, WSAMSG, setsockopt,
 };
 #[cfg(windows)]
 use windows_sys::Win32::System::IO::OVERLAPPED;
@@ -80,6 +80,25 @@ fn set_port_reuse_if_supported(socket: &Socket) -> std::io::Result<()> {
 fn set_port_reuse_if_supported(_socket: &Socket) -> std::io::Result<()> {
     Ok(())
 }
+
+#[cfg(unix)]
+#[repr(C)]
+struct GroupSourceRequest {
+    gsr_interface: u32,
+    gsr_group: GroupSourceSockAddrStorage,
+    gsr_source: GroupSourceSockAddrStorage,
+}
+
+#[cfg(all(unix, target_vendor = "apple"))]
+const MCAST_JOIN_SOURCE_GROUP_OPTION: libc::c_int = 82;
+#[cfg(all(unix, target_vendor = "apple"))]
+const MCAST_LEAVE_SOURCE_GROUP_OPTION: libc::c_int = 83;
+
+#[cfg(all(unix, target_vendor = "apple"))]
+type GroupSourceSockAddrStorage = [u8; std::mem::size_of::<libc::sockaddr_storage>()];
+
+#[cfg(all(unix, not(target_vendor = "apple")))]
+type GroupSourceSockAddrStorage = libc::sockaddr_storage;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DetailedReceiveMode {
@@ -188,6 +207,57 @@ fn try_socket_local_addr(socket: &Socket) -> Result<SocketAddr, McrxError> {
         .map_err(McrxError::SocketLocalAddrFailed)?
         .as_socket()
         .ok_or(McrxError::NonIpSocketAddress)
+}
+
+#[cfg(all(unix, not(target_vendor = "apple")))]
+fn ipv6_sockaddr_storage(addr: Ipv6Addr) -> libc::sockaddr_storage {
+    let mut storage = unsafe { std::mem::zeroed::<libc::sockaddr_storage>() };
+    let sockaddr = unsafe { &mut *std::ptr::addr_of_mut!(storage).cast::<libc::sockaddr_in6>() };
+    *sockaddr = unsafe { std::mem::zeroed() };
+    #[cfg(any(
+        target_vendor = "apple",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    ))]
+    {
+        sockaddr.sin6_len = std::mem::size_of::<libc::sockaddr_in6>() as _;
+    }
+    sockaddr.sin6_family = libc::AF_INET6 as _;
+    sockaddr.sin6_addr = libc::in6_addr {
+        s6_addr: addr.octets(),
+    };
+    storage
+}
+
+#[cfg(all(unix, target_vendor = "apple"))]
+fn ipv6_sockaddr_storage(addr: Ipv6Addr) -> GroupSourceSockAddrStorage {
+    let mut storage = [0u8; std::mem::size_of::<libc::sockaddr_storage>()];
+    let sockaddr = unsafe { &mut *storage.as_mut_ptr().cast::<libc::sockaddr_in6>() };
+    *sockaddr = unsafe { std::mem::zeroed() };
+    sockaddr.sin6_len = std::mem::size_of::<libc::sockaddr_in6>() as _;
+    sockaddr.sin6_family = libc::AF_INET6 as _;
+    sockaddr.sin6_addr = libc::in6_addr {
+        s6_addr: addr.octets(),
+    };
+    storage
+}
+
+#[cfg(windows)]
+fn ipv6_sockaddr_storage(addr: Ipv6Addr) -> SOCKADDR_STORAGE {
+    let mut storage = unsafe { std::mem::zeroed::<SOCKADDR_STORAGE>() };
+    let sockaddr = unsafe { &mut *std::ptr::addr_of_mut!(storage).cast::<SOCKADDR_IN6>() };
+
+    sockaddr.sin6_family = AF_INET6 as _;
+    sockaddr.sin6_addr = IN6_ADDR {
+        u: IN6_ADDR_0 {
+            Byte: addr.octets(),
+        },
+    };
+    sockaddr.Anonymous.sin6_scope_id = 0;
+
+    storage
 }
 
 fn socket_family(socket: &Socket) -> Option<SubscriptionAddressFamily> {
@@ -383,6 +453,117 @@ fn set_socket_option_flag(
 }
 
 #[cfg(all(unix, any(target_os = "linux", target_os = "android")))]
+fn set_ipv6_source_membership_option(
+    socket: &Socket,
+    option_name: libc::c_int,
+    group: Ipv6Addr,
+    source: Ipv6Addr,
+    interface: u32,
+) -> std::io::Result<()> {
+    let request = GroupSourceRequest {
+        gsr_interface: interface,
+        gsr_group: ipv6_sockaddr_storage(group),
+        gsr_source: ipv6_sockaddr_storage(source),
+    };
+
+    let result = unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::IPPROTO_IPV6,
+            option_name,
+            (&request as *const GroupSourceRequest).cast(),
+            std::mem::size_of_val(&request) as libc::socklen_t,
+        )
+    };
+
+    if result == -1 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(all(unix, target_vendor = "apple"))]
+fn set_ipv6_source_membership_option(
+    socket: &Socket,
+    option_name: libc::c_int,
+    group: Ipv6Addr,
+    source: Ipv6Addr,
+    interface: u32,
+) -> std::io::Result<()> {
+    let request = GroupSourceRequest {
+        gsr_interface: interface,
+        gsr_group: ipv6_sockaddr_storage(group),
+        gsr_source: ipv6_sockaddr_storage(source),
+    };
+
+    let result = unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::IPPROTO_IPV6,
+            option_name,
+            (&request as *const GroupSourceRequest).cast(),
+            std::mem::size_of_val(&request) as libc::socklen_t,
+        )
+    };
+
+    if result == -1 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn set_ipv6_source_membership_option(
+    socket: &Socket,
+    option_name: i32,
+    group: Ipv6Addr,
+    source: Ipv6Addr,
+    interface: u32,
+) -> std::io::Result<()> {
+    let request = GROUP_SOURCE_REQ {
+        gsr_interface: interface,
+        gsr_group: ipv6_sockaddr_storage(group),
+        gsr_source: ipv6_sockaddr_storage(source),
+    };
+
+    let result = unsafe {
+        setsockopt(
+            raw_socket(socket),
+            IPPROTO_IPV6 as i32,
+            option_name,
+            (&request as *const GROUP_SOURCE_REQ).cast(),
+            std::mem::size_of_val(&request) as i32,
+        )
+    };
+
+    if result == SOCKET_ERROR {
+        Err(last_wsa_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(any(
+    windows,
+    all(unix, any(target_os = "linux", target_os = "android")),
+    all(unix, target_vendor = "apple")
+)))]
+fn set_ipv6_source_membership_option(
+    _socket: &Socket,
+    _option_name: i32,
+    _group: Ipv6Addr,
+    _source: Ipv6Addr,
+    _interface: u32,
+) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        ErrorKind::Unsupported,
+        "IPv6 source-specific multicast is not supported on this platform",
+    ))
+}
+
+#[cfg(all(unix, any(target_os = "linux", target_os = "android")))]
 fn enable_receive_metadata(
     socket: &Socket,
     family: SubscriptionAddressFamily,
@@ -536,8 +717,7 @@ fn ancillary_buffer_size(family: SubscriptionAddressFamily) -> usize {
                 libc::CMSG_SPACE(std::mem::size_of::<libc::in_pktinfo>() as libc::c_uint) as usize
             }
             SubscriptionAddressFamily::Ipv6 => {
-                libc::CMSG_SPACE(std::mem::size_of::<libc::in6_pktinfo>() as libc::c_uint)
-                    as usize
+                libc::CMSG_SPACE(std::mem::size_of::<libc::in6_pktinfo>() as libc::c_uint) as usize
             }
         }
     }
@@ -563,8 +743,7 @@ fn ancillary_buffer_size(family: SubscriptionAddressFamily) -> usize {
                 (dst + iface) as usize
             }
             SubscriptionAddressFamily::Ipv6 => {
-                libc::CMSG_SPACE(std::mem::size_of::<libc::in6_pktinfo>() as libc::c_uint)
-                    as usize
+                libc::CMSG_SPACE(std::mem::size_of::<libc::in6_pktinfo>() as libc::c_uint) as usize
             }
         }
     }
@@ -708,14 +887,18 @@ fn apply_receive_ancillary_data(
                             target_os = "openbsd"
                         ))]
                         match (*cmsg).cmsg_type {
-                            libc::IP_RECVDSTADDR if control_message_contains::<libc::in_addr>(cmsg) => {
+                            libc::IP_RECVDSTADDR
+                                if control_message_contains::<libc::in_addr>(cmsg) =>
+                            {
                                 let addr = std::ptr::read_unaligned(
                                     libc::CMSG_DATA(cmsg) as *const libc::in_addr
                                 );
                                 metadata.destination_local_ip =
                                     Some(IpAddr::V4(ipv4_from_in_addr(addr)));
                             }
-                            libc::IP_RECVIF if control_message_contains::<SockAddrDlPrefix>(cmsg) => {
+                            libc::IP_RECVIF
+                                if control_message_contains::<SockAddrDlPrefix>(cmsg) =>
+                            {
                                 let addr = std::ptr::read_unaligned(
                                     libc::CMSG_DATA(cmsg) as *const SockAddrDlPrefix
                                 );
@@ -808,8 +991,7 @@ fn recv_packet_with_metadata_unix(
         iov_base: buf.as_mut_ptr().cast(),
         iov_len: buf.len(),
     };
-    let mut control =
-        vec![std::mem::MaybeUninit::<u8>::uninit(); ancillary_buffer_size(family)];
+    let mut control = vec![std::mem::MaybeUninit::<u8>::uninit(); ancillary_buffer_size(family)];
     let mut control_len = 0usize;
 
     let (len, addr) = match unsafe {
@@ -885,8 +1067,7 @@ fn recv_packet_with_metadata_windows(
         len: buf.len() as u32,
         buf: buf.as_mut_ptr().cast(),
     };
-    let mut control =
-        vec![std::mem::MaybeUninit::<u8>::uninit(); ancillary_buffer_size(family)];
+    let mut control = vec![std::mem::MaybeUninit::<u8>::uninit(); ancillary_buffer_size(family)];
     let mut bytes_received = 0u32;
 
     let (msg, addr) = match unsafe {
@@ -1106,7 +1287,65 @@ pub(crate) fn join_multicast_group(
                 None => socket
                     .join_multicast_v6(&membership.group, interface)
                     .map_err(McrxError::MulticastJoinFailed),
-                Some(_) => Err(McrxError::Ipv6SourceSpecificMulticastNotYetImplemented),
+                Some(source) => {
+                    let result = {
+                        #[cfg(all(unix, any(target_os = "linux", target_os = "android")))]
+                        {
+                            set_ipv6_source_membership_option(
+                                socket,
+                                libc::MCAST_JOIN_SOURCE_GROUP,
+                                membership.group,
+                                source,
+                                interface,
+                            )
+                        }
+
+                        #[cfg(all(unix, target_vendor = "apple"))]
+                        {
+                            set_ipv6_source_membership_option(
+                                socket,
+                                MCAST_JOIN_SOURCE_GROUP_OPTION,
+                                membership.group,
+                                source,
+                                interface,
+                            )
+                        }
+
+                        #[cfg(windows)]
+                        {
+                            set_ipv6_source_membership_option(
+                                socket,
+                                MCAST_JOIN_SOURCE_GROUP as i32,
+                                membership.group,
+                                source,
+                                interface,
+                            )
+                        }
+
+                        #[cfg(not(any(
+                            windows,
+                            all(unix, any(target_os = "linux", target_os = "android")),
+                            all(unix, target_vendor = "apple")
+                        )))]
+                        {
+                            set_ipv6_source_membership_option(
+                                socket,
+                                0,
+                                membership.group,
+                                source,
+                                interface,
+                            )
+                        }
+                    };
+
+                    match result {
+                        Ok(()) => Ok(()),
+                        Err(err) if err.kind() == ErrorKind::Unsupported => {
+                            Err(McrxError::SourceSpecificMulticastUnsupported)
+                        }
+                        Err(err) => Err(McrxError::MulticastJoinFailed(err)),
+                    }
+                }
             }
         }
     }
@@ -1142,7 +1381,65 @@ pub(crate) fn leave_multicast_group(
                 None => socket
                     .leave_multicast_v6(&membership.group, interface)
                     .map_err(McrxError::MulticastLeaveFailed),
-                Some(_) => Err(McrxError::Ipv6SourceSpecificMulticastNotYetImplemented),
+                Some(source) => {
+                    let result = {
+                        #[cfg(all(unix, any(target_os = "linux", target_os = "android")))]
+                        {
+                            set_ipv6_source_membership_option(
+                                socket,
+                                libc::MCAST_LEAVE_SOURCE_GROUP,
+                                membership.group,
+                                source,
+                                interface,
+                            )
+                        }
+
+                        #[cfg(all(unix, target_vendor = "apple"))]
+                        {
+                            set_ipv6_source_membership_option(
+                                socket,
+                                MCAST_LEAVE_SOURCE_GROUP_OPTION,
+                                membership.group,
+                                source,
+                                interface,
+                            )
+                        }
+
+                        #[cfg(windows)]
+                        {
+                            set_ipv6_source_membership_option(
+                                socket,
+                                MCAST_LEAVE_SOURCE_GROUP as i32,
+                                membership.group,
+                                source,
+                                interface,
+                            )
+                        }
+
+                        #[cfg(not(any(
+                            windows,
+                            all(unix, any(target_os = "linux", target_os = "android")),
+                            all(unix, target_vendor = "apple")
+                        )))]
+                        {
+                            set_ipv6_source_membership_option(
+                                socket,
+                                0,
+                                membership.group,
+                                source,
+                                interface,
+                            )
+                        }
+                    };
+
+                    match result {
+                        Ok(()) => Ok(()),
+                        Err(err) if err.kind() == ErrorKind::Unsupported => {
+                            Err(McrxError::SourceSpecificMulticastUnsupported)
+                        }
+                        Err(err) => Err(McrxError::MulticastLeaveFailed(err)),
+                    }
+                }
             }
         }
     }
@@ -1215,6 +1512,7 @@ pub(crate) fn recv_packet_with_metadata(
 mod tests {
     use super::*;
     use crate::config::SubscriptionConfig;
+    use crate::test_support::sample_ssm_config_v6;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use std::sync::atomic::{AtomicU16, Ordering};
 
@@ -1285,21 +1583,15 @@ mod tests {
     }
 
     #[test]
-    fn join_multicast_group_rejects_ipv6_ssm_until_supported() {
-        let mut config = SubscriptionConfig::ssm_v6(
-            "ff01::1234".parse().unwrap(),
-            "2001:db8::10".parse().unwrap(),
-            55018,
-        );
-        config.interface = Some(IpAddr::V6(Ipv6Addr::LOCALHOST));
+    fn open_and_join_socket_succeeds_for_valid_ipv6_ssm_config() {
+        let Some(config) = sample_ssm_config_v6(55018) else {
+            return;
+        };
 
         let socket = open_bound_socket(&config).unwrap();
         let result = join_multicast_group(socket.socket(), &config);
 
-        assert!(matches!(
-            result,
-            Err(McrxError::Ipv6SourceSpecificMulticastNotYetImplemented)
-        ));
+        assert!(result.is_ok(), "{result:?}");
     }
 
     #[test]
