@@ -1,6 +1,6 @@
 [package]
 name = "mcrx-core"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 license = "BSD-2-Clause"
 description = "Runtime-agnostic and portable multicast receiver library for IPv4 and IPv6 ASM/SSM."
@@ -11,6 +11,8 @@ documentation = "https://docs.rs/mcrx-core"
 keywords = ["multicast", "udp", "asm", "ssm", "networking"]
 categories = ["network-programming"]
 
+[workspace]
+members = ["mcrx-core-py"]
 
 [features]
 default = []
