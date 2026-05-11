@@ -14,6 +14,7 @@ pub(crate) fn sample_config(port: u16) -> SubscriptionConfig {
         source: SourceFilter::Any,
         dst_port: port,
         interface: None,
+        interface_index: None,
     }
 }
 
@@ -119,11 +120,16 @@ pub(crate) fn ipv6_group(config: &SubscriptionConfig) -> Ipv6Addr {
 }
 
 pub(crate) fn ipv6_group_socket_addr(config: &SubscriptionConfig) -> SocketAddrV6 {
-    let interface = match config.interface {
-        Some(IpAddr::V6(interface)) => interface,
-        _ => Ipv6Addr::LOCALHOST,
+    let ifindex = match config.interface_index {
+        Some(interface_index) => interface_index,
+        None => {
+            let interface = match config.interface {
+                Some(IpAddr::V6(interface)) => interface,
+                _ => Ipv6Addr::LOCALHOST,
+            };
+            crate::platform::resolve_ipv6_interface_index(interface).unwrap()
+        }
     };
-    let ifindex = crate::platform::resolve_ipv6_interface_index(interface).unwrap();
     SocketAddrV6::new(ipv6_group(config), config.dst_port, 0, ifindex)
 }
 

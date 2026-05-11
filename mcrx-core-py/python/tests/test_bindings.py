@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import socket
 import time
 import unittest
 
 from mcrx_core import AsyncSubscription, Context, add_reader
+from mcrx_core import asyncio as mcrx_asyncio
 
 
 def _send_ipv4_multicast(group: str, port: int, payload: bytes) -> None:
@@ -82,6 +84,73 @@ class BindingsTest(unittest.TestCase):
                 handle.close()
 
             self.assertEqual(payloads, [b"callback-packet"])
+
+        asyncio.run(run())
+
+    def test_poll_reader_loop_exits_when_subscription_is_removed(self) -> None:
+        class RemovedSubscription:
+            def recv_nowait(self):
+                raise LookupError("subscription removed")
+
+        async def run() -> None:
+            callback_count = 0
+
+            def on_packet(_packet) -> None:
+                nonlocal callback_count
+                callback_count += 1
+
+            await asyncio.wait_for(
+                mcrx_asyncio._poll_reader_loop(  # type: ignore[attr-defined]
+                    RemovedSubscription(),
+                    on_packet,
+                    with_metadata=False,
+                    poll_interval=0.001,
+                ),
+                timeout=0.1,
+            )
+
+            self.assertEqual(callback_count, 0)
+
+        asyncio.run(run())
+
+    def test_add_reader_closes_itself_when_subscription_is_removed(self) -> None:
+        class RemovedSubscription:
+            def __init__(self) -> None:
+                self._reader, self._writer = os.pipe()
+
+            def fileno(self) -> int:
+                return self._reader
+
+            def recv_nowait(self):
+                raise LookupError("subscription removed")
+
+            def close(self) -> None:
+                os.close(self._writer)
+                os.close(self._reader)
+
+        async def run() -> None:
+            loop = asyncio.get_running_loop()
+            if not hasattr(loop, "add_reader"):
+                self.skipTest("current asyncio loop does not support add_reader")
+
+            errors: list[dict[str, object]] = []
+            previous_handler = loop.get_exception_handler()
+            loop.set_exception_handler(lambda _loop, context: errors.append(context))
+
+            sub = RemovedSubscription()
+            payloads: list[bytes] = []
+            handle = add_reader(sub, lambda packet: payloads.append(packet.payload))
+
+            try:
+                os.write(sub._writer, b"x")
+                await asyncio.sleep(0.05)
+            finally:
+                handle.close()
+                sub.close()
+                loop.set_exception_handler(previous_handler)
+
+            self.assertEqual(payloads, [])
+            self.assertEqual(errors, [])
 
         asyncio.run(run())
 

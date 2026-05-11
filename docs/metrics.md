@@ -37,7 +37,7 @@ Delta fields represent only the change over the sampled interval:
 - packets received during the interval
 - bytes received during the interval
 - receive errors during the interval
-- joins, leaves, and batch activity during the interval
+- joins, leaves, and public batch receive calls during the interval
 
 ### Sampler
 
@@ -58,6 +58,10 @@ At the context level, these snapshot fields are cumulative totals:
 - `total_leave_count`
 - `batch_calls`
 - `batch_packets_received`
+
+`batch_calls` counts public calls to `Context::try_recv_batch_*()` and
+`Context::try_recv_all_*()`. It does not count the internal empty probe that
+`try_recv_all_*()` uses to detect that a drain is complete.
 
 At the subscription level, the per-subscription snapshot counters remain
 cumulative for the lifetime of that subscription object.

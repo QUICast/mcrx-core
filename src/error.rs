@@ -16,6 +16,10 @@ pub enum McrxError {
     #[error("MCRX: invalid source address")]
     InvalidSourceAddress,
 
+    /// The configured IPv6 SSM group is not in the IPv6 SSM range.
+    #[error("MCRX: IPv6 SSM groups must use the ff3x:: prefix")]
+    InvalidIpv6SsmGroup,
+
     /// The configured SSM source address family does not match the group family.
     #[error("MCRX: source address family must match group address family")]
     SourceAddressFamilyMismatch,
@@ -23,6 +27,14 @@ pub enum McrxError {
     /// The configured interface address family does not match the group family.
     #[error("MCRX: interface address family must match group address family")]
     InterfaceAddressFamilyMismatch,
+
+    /// The configured interface index is invalid.
+    #[error("MCRX: interface index must be greater than 0")]
+    InvalidInterfaceIndex,
+
+    /// The configured interface index is only valid for IPv6 subscriptions.
+    #[error("MCRX: interface index is only supported for IPv6 subscriptions")]
+    InterfaceIndexRequiresIpv6,
 
     /// A subscription with the same configuration already exists.
     #[error("MCRX: subscription already exists")]

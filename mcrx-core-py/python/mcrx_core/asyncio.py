@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
 from collections.abc import Callable
 from typing import Any
 
@@ -18,6 +19,13 @@ def _schedule_callback_result(
     result = callback(packet)
     if inspect.isawaitable(result):
         loop.create_task(result)
+
+
+def _duplicate_reader_fd(subscription: Subscription) -> int | None:
+    try:
+        return os.dup(subscription.fileno())
+    except (AttributeError, OSError):
+        return None
 
 
 class ReaderHandle:
@@ -101,18 +109,23 @@ async def _recv_async(
             if packet is not None:
                 return packet
 
+            reader_fd = _duplicate_reader_fd(subscription)
+            if reader_fd is None:
+                await asyncio.sleep(poll_interval)
+                continue
+
             future = running_loop.create_future()
-            fd = subscription.fileno()
 
             def on_ready() -> None:
                 if not future.done():
                     future.set_result(None)
 
-            running_loop.add_reader(fd, on_ready)
+            running_loop.add_reader(reader_fd, on_ready)
             try:
                 await future
             finally:
-                running_loop.remove_reader(fd)
+                running_loop.remove_reader(reader_fd)
+                os.close(reader_fd)
     else:
         while True:
             packet = recv_nowait()
@@ -137,7 +150,29 @@ def add_reader(
     )
 
     if hasattr(running_loop, "add_reader") and hasattr(subscription, "fileno"):
-        fd = subscription.fileno()
+        reader_fd = _duplicate_reader_fd(subscription)
+        if reader_fd is None:
+            task = running_loop.create_task(
+                _poll_reader_loop(
+                    subscription,
+                    callback,
+                    with_metadata=with_metadata,
+                    poll_interval=poll_interval,
+                )
+            )
+            return ReaderHandle(task.cancel)
+
+        closed = False
+
+        def close_reader() -> None:
+            nonlocal closed
+
+            if closed:
+                return
+
+            closed = True
+            running_loop.remove_reader(reader_fd)
+            os.close(reader_fd)
 
         def on_ready() -> None:
             try:
@@ -146,6 +181,8 @@ def add_reader(
                     if packet is None:
                         break
                     _schedule_callback_result(running_loop, callback, packet)
+            except LookupError:
+                close_reader()
             except Exception as exc:  # pragma: no cover - exercised by loop
                 running_loop.call_exception_handler(
                     {
@@ -154,8 +191,8 @@ def add_reader(
                     }
                 )
 
-        running_loop.add_reader(fd, on_ready)
-        return ReaderHandle(lambda: running_loop.remove_reader(fd))
+        running_loop.add_reader(reader_fd, on_ready)
+        return ReaderHandle(close_reader)
 
     task = running_loop.create_task(
         _poll_reader_loop(
@@ -189,5 +226,7 @@ async def _poll_reader_loop(
                 continue
 
             _schedule_callback_result(asyncio.get_running_loop(), callback, packet)
+    except LookupError:
+        return
     except asyncio.CancelledError:
         raise

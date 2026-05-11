@@ -11,23 +11,23 @@ use socket2::Socket;
 #[cfg(feature = "metrics")]
 use crate::metrics::ContextMetricsSnapshot;
 #[cfg(feature = "metrics")]
-use std::cell::Cell;
+use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "metrics")]
 use std::time::SystemTime;
 
 #[cfg(feature = "metrics")]
 #[derive(Debug, Default)]
 struct ContextMetricsInner {
-    subscriptions_added: Cell<u64>,
-    subscriptions_removed: Cell<u64>,
-    total_packets_received: Cell<u64>,
-    total_bytes_received: Cell<u64>,
-    total_would_block_count: Cell<u64>,
-    total_receive_errors: Cell<u64>,
-    total_join_count: Cell<u64>,
-    total_leave_count: Cell<u64>,
-    batch_calls: Cell<u64>,
-    batch_packets_received: Cell<u64>,
+    subscriptions_added: AtomicU64,
+    subscriptions_removed: AtomicU64,
+    total_packets_received: AtomicU64,
+    total_bytes_received: AtomicU64,
+    total_would_block_count: AtomicU64,
+    total_receive_errors: AtomicU64,
+    total_join_count: AtomicU64,
+    total_leave_count: AtomicU64,
+    batch_calls: AtomicU64,
+    batch_packets_received: AtomicU64,
 }
 
 /// Owns and manages the set of active subscriptions.
@@ -45,24 +45,36 @@ impl Context {
     fn record_received_packet(&self, payload_len: usize) {
         self.metrics
             .total_packets_received
-            .set(self.metrics.total_packets_received.get() + 1);
+            .fetch_add(1, Ordering::Relaxed);
         self.metrics
             .total_bytes_received
-            .set(self.metrics.total_bytes_received.get() + payload_len as u64);
+            .fetch_add(payload_len as u64, Ordering::Relaxed);
     }
 
     #[cfg(feature = "metrics")]
     fn record_would_block(&self) {
         self.metrics
             .total_would_block_count
-            .set(self.metrics.total_would_block_count.get() + 1);
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     #[cfg(feature = "metrics")]
     fn record_receive_error(&self) {
         self.metrics
             .total_receive_errors
-            .set(self.metrics.total_receive_errors.get() + 1);
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[cfg(feature = "metrics")]
+    fn record_batch_call(&self) {
+        self.metrics.batch_calls.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[cfg(feature = "metrics")]
+    fn record_batch_packets_received(&self, packet_count: usize) {
+        self.metrics
+            .batch_packets_received
+            .fetch_add(packet_count as u64, Ordering::Relaxed);
     }
 
     fn ensure_subscription_config_is_unique(
@@ -94,7 +106,7 @@ impl Context {
         #[cfg(feature = "metrics")]
         self.metrics
             .subscriptions_added
-            .set(self.metrics.subscriptions_added.get() + 1);
+            .fetch_add(1, Ordering::Relaxed);
 
         id
     }
@@ -111,7 +123,7 @@ impl Context {
         #[cfg(feature = "metrics")]
         self.metrics
             .subscriptions_removed
-            .set(self.metrics.subscriptions_removed.get() + 1);
+            .fetch_add(1, Ordering::Relaxed);
 
         removed
     }
@@ -148,18 +160,18 @@ impl Context {
         }
 
         ContextMetricsSnapshot {
-            subscriptions_added: self.metrics.subscriptions_added.get(),
-            subscriptions_removed: self.metrics.subscriptions_removed.get(),
+            subscriptions_added: self.metrics.subscriptions_added.load(Ordering::Relaxed),
+            subscriptions_removed: self.metrics.subscriptions_removed.load(Ordering::Relaxed),
             active_subscriptions: self.subscriptions.len(),
             joined_subscriptions,
-            total_packets_received: self.metrics.total_packets_received.get(),
-            total_bytes_received: self.metrics.total_bytes_received.get(),
-            total_would_block_count: self.metrics.total_would_block_count.get(),
-            total_receive_errors: self.metrics.total_receive_errors.get(),
-            total_join_count: self.metrics.total_join_count.get(),
-            total_leave_count: self.metrics.total_leave_count.get(),
-            batch_calls: self.metrics.batch_calls.get(),
-            batch_packets_received: self.metrics.batch_packets_received.get(),
+            total_packets_received: self.metrics.total_packets_received.load(Ordering::Relaxed),
+            total_bytes_received: self.metrics.total_bytes_received.load(Ordering::Relaxed),
+            total_would_block_count: self.metrics.total_would_block_count.load(Ordering::Relaxed),
+            total_receive_errors: self.metrics.total_receive_errors.load(Ordering::Relaxed),
+            total_join_count: self.metrics.total_join_count.load(Ordering::Relaxed),
+            total_leave_count: self.metrics.total_leave_count.load(Ordering::Relaxed),
+            batch_calls: self.metrics.batch_calls.load(Ordering::Relaxed),
+            batch_packets_received: self.metrics.batch_packets_received.load(Ordering::Relaxed),
             captured_at: SystemTime::now(),
         }
     }
@@ -266,7 +278,7 @@ impl Context {
         #[cfg(feature = "metrics")]
         self.metrics
             .total_join_count
-            .set(self.metrics.total_join_count.get() + 1);
+            .fetch_add(1, Ordering::Relaxed);
 
         Ok(())
     }
@@ -331,7 +343,7 @@ impl Context {
         #[cfg(feature = "metrics")]
         self.metrics
             .total_leave_count
-            .set(self.metrics.total_leave_count.get() + 1);
+            .fetch_add(1, Ordering::Relaxed);
 
         Ok(())
     }
@@ -383,12 +395,18 @@ impl Context {
         out: &mut Vec<Packet>,
         max_packets: usize,
     ) -> Result<usize, McrxError> {
-        let mut received = 0;
-
         #[cfg(feature = "metrics")]
-        self.metrics
-            .batch_calls
-            .set(self.metrics.batch_calls.get() + 1);
+        self.record_batch_call();
+
+        self.try_recv_batch_into_impl(out, max_packets)
+    }
+
+    fn try_recv_batch_into_impl(
+        &mut self,
+        out: &mut Vec<Packet>,
+        max_packets: usize,
+    ) -> Result<usize, McrxError> {
+        let mut received = 0;
 
         for _ in 0..max_packets {
             match self.try_recv_any()? {
@@ -401,9 +419,7 @@ impl Context {
         }
 
         #[cfg(feature = "metrics")]
-        self.metrics
-            .batch_packets_received
-            .set(self.metrics.batch_packets_received.get() + received as u64);
+        self.record_batch_packets_received(received);
 
         Ok(received)
     }
@@ -415,12 +431,18 @@ impl Context {
         out: &mut Vec<PacketWithMetadata>,
         max_packets: usize,
     ) -> Result<usize, McrxError> {
-        let mut received = 0;
-
         #[cfg(feature = "metrics")]
-        self.metrics
-            .batch_calls
-            .set(self.metrics.batch_calls.get() + 1);
+        self.record_batch_call();
+
+        self.try_recv_batch_with_metadata_into_impl(out, max_packets)
+    }
+
+    fn try_recv_batch_with_metadata_into_impl(
+        &mut self,
+        out: &mut Vec<PacketWithMetadata>,
+        max_packets: usize,
+    ) -> Result<usize, McrxError> {
+        let mut received = 0;
 
         for _ in 0..max_packets {
             match self.try_recv_any_with_metadata()? {
@@ -433,9 +455,7 @@ impl Context {
         }
 
         #[cfg(feature = "metrics")]
-        self.metrics
-            .batch_packets_received
-            .set(self.metrics.batch_packets_received.get() + received as u64);
+        self.record_batch_packets_received(received);
 
         Ok(received)
     }
@@ -451,8 +471,11 @@ impl Context {
     pub fn try_recv_all_into(&mut self, out: &mut Vec<Packet>) -> Result<usize, McrxError> {
         let mut total_received = 0;
 
+        #[cfg(feature = "metrics")]
+        self.record_batch_call();
+
         loop {
-            let received = self.try_recv_batch_into(out, usize::MAX)?;
+            let received = self.try_recv_batch_into_impl(out, usize::MAX)?;
             total_received += received;
 
             if received == 0 {
@@ -471,8 +494,11 @@ impl Context {
     ) -> Result<usize, McrxError> {
         let mut total_received = 0;
 
+        #[cfg(feature = "metrics")]
+        self.record_batch_call();
+
         loop {
-            let received = self.try_recv_batch_with_metadata_into(out, usize::MAX)?;
+            let received = self.try_recv_batch_with_metadata_into_impl(out, usize::MAX)?;
             total_received += received;
 
             if received == 0 {
@@ -615,6 +641,7 @@ mod tests {
             source: SourceFilter::Any,
             dst_port: 5000,
             interface: None,
+            interface_index: None,
         };
 
         let result = context.add_subscription(invalid_config);
@@ -676,6 +703,10 @@ mod tests {
         assert_eq!(&packet.packet.payload[..], payload);
         assert_pktinfo_metadata(&packet, config.group);
         assert_eq!(packet.metadata.configured_interface, config.interface);
+        assert_eq!(
+            packet.metadata.configured_interface_index,
+            config.interface_index
+        );
         assert_eq!(
             packet.metadata.socket_local_addr,
             Some(std::net::SocketAddr::V6(SocketAddrV6::new(

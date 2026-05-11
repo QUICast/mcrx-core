@@ -28,6 +28,8 @@ pub struct ReceiveMetadata {
     ///
     /// This reflects configured intent, not pktinfo-derived ingress state.
     pub configured_interface: Option<IpAddr>,
+    /// The local IPv6 interface index requested by the subscription configuration, if any.
+    pub configured_interface_index: Option<u32>,
     /// The local destination IP address from pktinfo-style metadata, if available.
     pub destination_local_ip: Option<IpAddr>,
     /// The ingress interface index from pktinfo-style metadata, if available.
@@ -39,6 +41,7 @@ impl ReceiveMetadata {
         Self {
             socket_local_addr: None,
             configured_interface: None,
+            configured_interface_index: None,
             destination_local_ip: None,
             ingress_interface_index: None,
         }
@@ -129,6 +132,7 @@ mod tests {
                     5000,
                 ))),
                 configured_interface: None,
+                configured_interface_index: None,
                 destination_local_ip: None,
                 ingress_interface_index: None,
             },

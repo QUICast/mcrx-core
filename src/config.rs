@@ -34,6 +34,11 @@ pub struct SubscriptionConfig {
     pub dst_port: u16,
     /// The local interface address to join on, if explicitly specified.
     pub interface: Option<IpAddr>,
+    /// The local IPv6 interface index to join on, if explicitly specified.
+    ///
+    /// This is primarily useful for scoped/link-local IPv6 multicast where an
+    /// interface address alone may be ambiguous across multiple adapters.
+    pub interface_index: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +53,7 @@ pub(crate) struct Ipv6Membership {
     pub(crate) group: Ipv6Addr,
     pub(crate) source: Option<Ipv6Addr>,
     pub(crate) interface: Option<Ipv6Addr>,
+    pub(crate) interface_index: Option<u32>,
 }
 
 impl SubscriptionConfig {
@@ -69,12 +75,28 @@ impl SubscriptionConfig {
             if !same_family(self.group, source) {
                 return Err(McrxError::SourceAddressFamilyMismatch);
             }
+
+            if let (IpAddr::V6(group), IpAddr::V6(_)) = (self.group, source)
+                && !is_ipv6_ssm_group(group)
+            {
+                return Err(McrxError::InvalidIpv6SsmGroup);
+            }
         }
 
         if let Some(interface) = self.interface
             && !same_family(self.group, interface)
         {
             return Err(McrxError::InterfaceAddressFamilyMismatch);
+        }
+
+        if let Some(interface_index) = self.interface_index {
+            if interface_index == 0 {
+                return Err(McrxError::InvalidInterfaceIndex);
+            }
+
+            if !self.is_ipv6() {
+                return Err(McrxError::InterfaceIndexRequiresIpv6);
+            }
         }
 
         Ok(())
@@ -123,6 +145,7 @@ impl SubscriptionConfig {
             source: SourceFilter::Any,
             dst_port: port,
             interface: None,
+            interface_index: None,
         }
     }
 
@@ -143,6 +166,7 @@ impl SubscriptionConfig {
             source: SourceFilter::Source(source),
             dst_port: port,
             interface: None,
+            interface_index: None,
         }
     }
 
@@ -193,6 +217,7 @@ impl SubscriptionConfig {
             group,
             source,
             interface,
+            interface_index: self.interface_index,
         })
     }
 }
@@ -202,6 +227,11 @@ fn same_family(left: IpAddr, right: IpAddr) -> bool {
         (left, right),
         (IpAddr::V4(_), IpAddr::V4(_)) | (IpAddr::V6(_), IpAddr::V6(_))
     )
+}
+
+fn is_ipv6_ssm_group(group: Ipv6Addr) -> bool {
+    let octets = group.octets();
+    octets[0] == 0xff && (octets[1] >> 4) == 0x3
 }
 
 #[cfg(test)]
@@ -215,6 +245,7 @@ mod tests {
             source: SourceFilter::Any,
             dst_port: 5000,
             interface: None,
+            interface_index: None,
         };
 
         assert!(cfg.validate().is_ok());
@@ -227,6 +258,7 @@ mod tests {
             source: SourceFilter::Any,
             dst_port: 0,
             interface: None,
+            interface_index: None,
         };
 
         let result = cfg.validate();
@@ -241,6 +273,7 @@ mod tests {
             source: SourceFilter::Any,
             dst_port: 5000,
             interface: None,
+            interface_index: None,
         };
 
         let result = cfg.validate();
@@ -255,6 +288,7 @@ mod tests {
             source: SourceFilter::Source(Ipv4Addr::new(239, 1, 1, 1).into()),
             dst_port: 5000,
             interface: None,
+            interface_index: None,
         };
 
         let result = cfg.validate();
@@ -286,6 +320,19 @@ mod tests {
     }
 
     #[test]
+    fn ipv6_ssm_requires_ff3x_group_range() {
+        let cfg = SubscriptionConfig::ssm_v6(
+            "ff12::1234".parse().unwrap(),
+            "2001:db8::10".parse().unwrap(),
+            5000,
+        );
+
+        let result = cfg.validate();
+
+        assert!(matches!(result, Err(McrxError::InvalidIpv6SsmGroup)));
+    }
+
+    #[test]
     fn source_family_mismatch_fails_validation() {
         let cfg = SubscriptionConfig::ssm_ip(
             Ipv4Addr::new(232, 1, 2, 3).into(),
@@ -312,5 +359,24 @@ mod tests {
             result,
             Err(McrxError::InterfaceAddressFamilyMismatch)
         ));
+    }
+
+    #[test]
+    fn ipv4_config_rejects_interface_index() {
+        let mut cfg = SubscriptionConfig::asm(Ipv4Addr::new(239, 1, 2, 3), 5000);
+        cfg.interface_index = Some(7);
+
+        let result = cfg.validate();
+
+        assert!(matches!(result, Err(McrxError::InterfaceIndexRequiresIpv6)));
+    }
+
+    #[test]
+    fn ipv6_config_accepts_interface_index() {
+        let mut cfg = SubscriptionConfig::asm_v6("ff01::1234".parse().unwrap(), 5000);
+        cfg.interface_index = Some(7);
+
+        assert!(cfg.validate().is_ok());
+        assert_eq!(cfg.ipv6_membership().unwrap().interface_index, Some(7));
     }
 }

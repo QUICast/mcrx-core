@@ -6,7 +6,11 @@ pub(crate) struct ReceiveCliArgs {
     pub(crate) dst_port: u16,
     pub(crate) source: Option<IpAddr>,
     pub(crate) interface: Option<IpAddr>,
+    pub(crate) interface_index: Option<u32>,
 }
+
+type ParsedInterface = (Option<IpAddr>, Option<u32>);
+type ParsedSourceAndInterface = (Option<IpAddr>, Option<IpAddr>, Option<u32>);
 
 pub(crate) fn parse_receive_cli_args(args: &[String]) -> Result<ReceiveCliArgs, String> {
     if args.len() < 3 {
@@ -17,7 +21,7 @@ pub(crate) fn parse_receive_cli_args(args: &[String]) -> Result<ReceiveCliArgs, 
     let dst_port = parse_port(&args[2])?;
     let remainder = &args[3..];
 
-    let (source, interface) = parse_mixed_args(remainder)?;
+    let (source, interface, interface_index) = parse_mixed_args(group, remainder)?;
 
     if !group.is_multicast() {
         return Err(format!("group address {group} is not multicast"));
@@ -28,12 +32,17 @@ pub(crate) fn parse_receive_cli_args(args: &[String]) -> Result<ReceiveCliArgs, 
         dst_port,
         source,
         interface,
+        interface_index,
     })
 }
 
-fn parse_flag_args(remainder: &[String]) -> Result<(Option<IpAddr>, Option<IpAddr>), String> {
+fn parse_flag_args(
+    group: IpAddr,
+    remainder: &[String],
+) -> Result<ParsedSourceAndInterface, String> {
     let mut source = None;
     let mut interface = None;
+    let mut interface_index = None;
     let mut index = 0usize;
 
     while index < remainder.len() {
@@ -49,7 +58,9 @@ fn parse_flag_args(remainder: &[String]) -> Result<(Option<IpAddr>, Option<IpAdd
                 let value = remainder
                     .get(index + 1)
                     .ok_or_else(|| "missing value after --interface".to_string())?;
-                interface = Some(parse_ip("interface", value)?);
+                let parsed = parse_interface_value(group, value)?;
+                interface = parsed.0;
+                interface_index = parsed.1;
                 index += 2;
             }
             other => {
@@ -58,10 +69,13 @@ fn parse_flag_args(remainder: &[String]) -> Result<(Option<IpAddr>, Option<IpAdd
         }
     }
 
-    Ok((source, interface))
+    Ok((source, interface, interface_index))
 }
 
-fn parse_mixed_args(remainder: &[String]) -> Result<(Option<IpAddr>, Option<IpAddr>), String> {
+fn parse_mixed_args(
+    group: IpAddr,
+    remainder: &[String],
+) -> Result<ParsedSourceAndInterface, String> {
     let mut positional = Vec::new();
     let mut flagged = Vec::new();
     let mut index = 0usize;
@@ -80,7 +94,7 @@ fn parse_mixed_args(remainder: &[String]) -> Result<(Option<IpAddr>, Option<IpAd
         }
     }
 
-    let (mut source, mut interface) = parse_flag_args(&flagged)?;
+    let (mut source, mut interface, mut interface_index) = parse_flag_args(group, &flagged)?;
 
     let mut positional = positional.into_iter();
 
@@ -93,20 +107,51 @@ fn parse_mixed_args(remainder: &[String]) -> Result<(Option<IpAddr>, Option<IpAd
     if interface.is_none()
         && let Some(value) = positional.next()
     {
-        interface = Some(parse_ip("interface", &value)?);
+        let parsed = parse_interface_value(group, &value)?;
+        interface = parsed.0;
+        interface_index = parsed.1;
     }
 
     if positional.next().is_some() {
         return Err("invalid arguments".to_string());
     }
 
-    Ok((source, interface))
+    Ok((source, interface, interface_index))
 }
 
 fn parse_ip(name: &str, value: &str) -> Result<IpAddr, String> {
     value
         .parse::<IpAddr>()
         .map_err(|err| format!("invalid {name} '{value}': {err}"))
+}
+
+fn parse_interface_value(group: IpAddr, value: &str) -> Result<ParsedInterface, String> {
+    if group.is_ipv6() {
+        if let Some((addr, scope)) = value.rsplit_once('%') {
+            let addr = addr
+                .parse::<std::net::Ipv6Addr>()
+                .map_err(|err| format!("invalid interface '{value}': {err}"))?;
+            let scope = scope
+                .parse::<u32>()
+                .map_err(|err| format!("invalid interface scope '{scope}': {err}"))?;
+            if scope == 0 {
+                return Err("interface scope index must not be 0".to_string());
+            }
+            return Ok((Some(IpAddr::V6(addr)), Some(scope)));
+        }
+
+        if value.chars().all(|ch| ch.is_ascii_digit()) {
+            let scope = value
+                .parse::<u32>()
+                .map_err(|err| format!("invalid interface index '{value}': {err}"))?;
+            if scope == 0 {
+                return Err("interface index must not be 0".to_string());
+            }
+            return Ok((None, Some(scope)));
+        }
+    }
+
+    Ok((Some(parse_ip("interface", value)?), None))
 }
 
 fn parse_port(value: &str) -> Result<u16, String> {
@@ -140,6 +185,7 @@ mod tests {
         assert_eq!(parsed.dst_port, 5000);
         assert_eq!(parsed.source, None);
         assert_eq!(parsed.interface, None);
+        assert_eq!(parsed.interface_index, None);
     }
 
     #[test]
@@ -155,6 +201,7 @@ mod tests {
         assert_eq!(parsed.dst_port, 5000);
         assert_eq!(parsed.source, None);
         assert_eq!(parsed.interface, Some(IpAddr::V6(Ipv6Addr::LOCALHOST)));
+        assert_eq!(parsed.interface_index, None);
     }
 
     #[test]
@@ -179,6 +226,7 @@ mod tests {
             parsed.interface,
             Some(IpAddr::V4("192.168.1.20".parse::<Ipv4Addr>().unwrap()))
         );
+        assert_eq!(parsed.interface_index, None);
     }
 
     #[test]
@@ -210,5 +258,41 @@ mod tests {
                     .unwrap()
             ))
         );
+        assert_eq!(parsed.interface_index, None);
+    }
+
+    #[test]
+    fn parses_scoped_ipv6_interface() {
+        let args = argv(&[
+            "mcrx-recv-meta",
+            "ff32::8000:1234",
+            "5000",
+            "--interface",
+            "fe80::1%7",
+        ]);
+
+        let parsed = parse_receive_cli_args(&args).unwrap();
+
+        assert_eq!(
+            parsed.interface,
+            Some(IpAddr::V6("fe80::1".parse().unwrap()))
+        );
+        assert_eq!(parsed.interface_index, Some(7));
+    }
+
+    #[test]
+    fn parses_numeric_ipv6_interface_index() {
+        let args = argv(&[
+            "mcrx-recv-meta",
+            "ff3e::8000:1234",
+            "5000",
+            "--interface",
+            "9",
+        ]);
+
+        let parsed = parse_receive_cli_args(&args).unwrap();
+
+        assert_eq!(parsed.interface, None);
+        assert_eq!(parsed.interface_index, Some(9));
     }
 }

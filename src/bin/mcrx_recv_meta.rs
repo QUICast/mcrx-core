@@ -37,12 +37,14 @@ fn run() -> Result<(), String> {
     let dst_port = parsed.dst_port;
     let source = parsed.source;
     let interface = parsed.interface;
+    let interface_index = parsed.interface_index;
 
     let mut config = match source {
         Some(source) => SubscriptionConfig::ssm_ip(group, source, dst_port),
         None => SubscriptionConfig::asm_ip(group, dst_port),
     };
     config.interface = interface;
+    config.interface_index = interface_index;
 
     let mut ctx = Context::new();
     let subscription_id = ctx
@@ -55,7 +57,10 @@ fn run() -> Result<(), String> {
     println!("  group:      {group}");
     println!("  dst_port:   {dst_port}");
     println!("  source:     {}", source_string(source));
-    println!("  interface:  {}", interface_string(interface));
+    println!(
+        "  interface:  {}",
+        interface_string(interface, interface_index)
+    );
     println!("  sub_id:     {}", subscription_id.0);
     println!();
     println!("waiting for packets with rich metadata ...");
@@ -75,9 +80,10 @@ fn run() -> Result<(), String> {
                     packet.packet.payload.len()
                 );
                 println!(
-                    "       meta: socket_local_addr={:?} configured_interface={:?} destination_local_ip={:?} ingress_ifindex={:?}",
+                    "       meta: socket_local_addr={:?} configured_interface={:?} configured_interface_index={:?} destination_local_ip={:?} ingress_ifindex={:?}",
                     packet.metadata.socket_local_addr,
                     packet.metadata.configured_interface,
+                    packet.metadata.configured_interface_index,
                     packet.metadata.destination_local_ip,
                     packet.metadata.ingress_interface_index
                 );
@@ -95,10 +101,14 @@ fn source_string(source: Option<IpAddr>) -> String {
     }
 }
 
-fn interface_string(interface: Option<IpAddr>) -> String {
-    match interface {
-        Some(interface) => interface.to_string(),
-        None => "default".to_string(),
+fn interface_string(interface: Option<IpAddr>, interface_index: Option<u32>) -> String {
+    match (interface, interface_index) {
+        (Some(IpAddr::V6(interface)), Some(interface_index)) => {
+            format!("{interface}%{interface_index}")
+        }
+        (Some(interface), _) => interface.to_string(),
+        (None, Some(interface_index)) => format!("ifindex:{interface_index}"),
+        (None, None) => "default".to_string(),
     }
 }
 
@@ -141,6 +151,8 @@ fn print_usage(program: &str) {
     eprintln!("  interface  optional local interface address");
     eprintln!("examples:");
     eprintln!("  {program} ff01::1234 5000 --interface ::1");
+    eprintln!("  {program} ff32::8000:1234 5000 --interface fe80::1%7");
+    eprintln!("  {program} ff3e::8000:1234 5000 --interface 7");
     eprintln!("  {program} ff31::8000:1234 5000 <sender-ipv6> --interface <receiver-ipv6>");
     eprintln!(
         "  {program} ff32::8000:1234 5000 <sender-fe80> --interface <receiver-fe80-or-other-local-ipv6>"

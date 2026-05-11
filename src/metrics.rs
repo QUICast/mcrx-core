@@ -761,6 +761,7 @@ impl ContextMetricsSampler {
 mod tests {
     use super::*;
     use crate::Context;
+    use crate::Subscription;
     use crate::SubscriptionConfig;
     use crate::test_support::{make_multicast_sender, recv_next_packet, sample_config};
 
@@ -797,6 +798,8 @@ mod tests {
             captured_at: SystemTime::now(),
         }
     }
+
+    fn assert_sync<T: Sync>() {}
 
     // Test helper: uses fixed non-zero values for unrelated fields.
     fn make_subscription_snapshot(
@@ -1107,5 +1110,35 @@ mod tests {
         assert_eq!(delta.bytes_received, payload.len() as u64);
         assert_eq!(delta.join_count, 0);
         assert_eq!(delta.leave_count, 0);
+    }
+
+    #[test]
+    fn try_recv_all_counts_one_batch_call_per_public_invocation() {
+        let mut context = Context::new();
+        let config = sample_config(9020);
+        let id = context.add_subscription(config.clone()).unwrap();
+        context.join_subscription(id).unwrap();
+
+        let sender = make_multicast_sender();
+        let destination = SocketAddrV4::new(ipv4_group(&config), config.dst_port);
+        sender.send_to(b"batch-one", destination).unwrap();
+        sender.send_to(b"batch-two", destination).unwrap();
+
+        thread::sleep(Duration::from_millis(50));
+
+        let mut packets = Vec::new();
+        let received = context.try_recv_all_into(&mut packets).unwrap();
+        let metrics = context.metrics_snapshot();
+
+        assert_eq!(received, 2);
+        assert_eq!(packets.len(), 2);
+        assert_eq!(metrics.batch_calls, 1);
+        assert_eq!(metrics.batch_packets_received, 2);
+    }
+
+    #[test]
+    fn metrics_feature_preserves_sync_for_core_types() {
+        assert_sync::<Context>();
+        assert_sync::<Subscription>();
     }
 }

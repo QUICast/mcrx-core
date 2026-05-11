@@ -6,7 +6,7 @@ use pyo3::exceptions::{PyLookupError, PyOSError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyModule};
 use std::cell::RefCell;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::rc::Rc;
 
 #[derive(Debug, Clone)]
@@ -41,6 +41,36 @@ fn parse_optional_ip_addr(raw: Option<&str>, field: &'static str) -> PyResult<Op
     raw.map(|value| parse_ip_addr(value, field)).transpose()
 }
 
+fn parse_interface_selector(
+    group: IpAddr,
+    raw: Option<&str>,
+) -> PyResult<(Option<IpAddr>, Option<u32>)> {
+    let Some(raw) = raw else {
+        return Ok((None, None));
+    };
+
+    if group.is_ipv6() {
+        if let Some((addr, scope)) = raw.rsplit_once('%') {
+            let addr = addr
+                .parse::<Ipv6Addr>()
+                .map_err(|_| invalid_argument(format!("invalid interface IP address: {raw}")))?;
+            let scope = scope
+                .parse::<u32>()
+                .map_err(|_| invalid_argument(format!("invalid interface scope index: {scope}")))?;
+            return Ok((Some(IpAddr::V6(addr)), Some(scope)));
+        }
+
+        if raw.chars().all(|ch| ch.is_ascii_digit()) {
+            let scope = raw
+                .parse::<u32>()
+                .map_err(|_| invalid_argument(format!("invalid interface scope index: {raw}")))?;
+            return Ok((None, Some(scope)));
+        }
+    }
+
+    Ok((Some(parse_ip_addr(raw, "interface")?), None))
+}
+
 fn build_subscription_config(
     group: &str,
     dst_port: u16,
@@ -49,13 +79,14 @@ fn build_subscription_config(
 ) -> PyResult<SubscriptionConfig> {
     let group = parse_ip_addr(group, "group")?;
     let source_addr = parse_optional_ip_addr(source, "source")?;
-    let interface_addr = parse_optional_ip_addr(interface, "interface")?;
+    let (interface_addr, interface_index) = parse_interface_selector(group, interface)?;
 
     let mut config = match source_addr {
         Some(source_addr) => SubscriptionConfig::ssm_ip(group, source_addr, dst_port),
         None => SubscriptionConfig::asm_ip(group, dst_port),
     };
     config.interface = interface_addr;
+    config.interface_index = interface_index;
 
     Ok(config)
 }
@@ -87,8 +118,11 @@ fn mcrx_error_to_py(err: McrxError) -> PyErr {
         McrxError::InvalidDestinationPort
         | McrxError::InvalidMulticastGroup
         | McrxError::InvalidSourceAddress
+        | McrxError::InvalidIpv6SsmGroup
         | McrxError::SourceAddressFamilyMismatch
-        | McrxError::InterfaceAddressFamilyMismatch => PyValueError::new_err(err.to_string()),
+        | McrxError::InterfaceAddressFamilyMismatch
+        | McrxError::InvalidInterfaceIndex
+        | McrxError::InterfaceIndexRequiresIpv6 => PyValueError::new_err(err.to_string()),
         McrxError::SubscriptionNotFound => PyLookupError::new_err(err.to_string()),
         McrxError::SocketCreateFailed(io_err)
         | McrxError::SocketOptionFailed(io_err)
@@ -107,11 +141,11 @@ fn mcrx_error_to_py(err: McrxError) -> PyErr {
     }
 }
 
-fn with_context<T>(
-    shared: &SharedContext,
-    f: impl FnOnce(&Context) -> PyResult<T>,
-) -> PyResult<T> {
-    let context = shared.inner.try_borrow().map_err(|_| borrow_error("context"))?;
+fn with_context<T>(shared: &SharedContext, f: impl FnOnce(&Context) -> PyResult<T>) -> PyResult<T> {
+    let context = shared
+        .inner
+        .try_borrow()
+        .map_err(|_| borrow_error("context"))?;
     f(&context)
 }
 
@@ -220,7 +254,9 @@ impl PyContext {
             context.try_recv_any().map_err(mcrx_error_to_py)
         })?;
 
-        packet.map(|packet| context_packet_to_py(py, packet)).transpose()
+        packet
+            .map(|packet| context_packet_to_py(py, packet))
+            .transpose()
     }
 
     fn recv_any_with_metadata_nowait(
@@ -296,6 +332,16 @@ impl PySubscription {
     }
 
     #[getter]
+    fn interface_index(&self) -> PyResult<Option<u32>> {
+        with_context(&self.shared, |context| {
+            let subscription = context
+                .get_subscription(self.id)
+                .ok_or_else(|| PyLookupError::new_err("mcrx_core subscription not found"))?;
+            Ok(subscription.config().interface_index)
+        })
+    }
+
+    #[getter]
     fn join_mode(&self) -> PyResult<&'static str> {
         with_context(&self.shared, |context| {
             let subscription = context
@@ -323,12 +369,16 @@ impl PySubscription {
 
     fn leave(&self) -> PyResult<()> {
         with_context_mut(&self.shared, |context| {
-            context.leave_subscription(self.id).map_err(mcrx_error_to_py)
+            context
+                .leave_subscription(self.id)
+                .map_err(mcrx_error_to_py)
         })
     }
 
     fn remove(&self) -> PyResult<bool> {
-        with_context_mut(&self.shared, |context| Ok(context.remove_subscription(self.id)))
+        with_context_mut(&self.shared, |context| {
+            Ok(context.remove_subscription(self.id))
+        })
     }
 
     fn is_joined(&self) -> PyResult<bool> {
@@ -367,7 +417,9 @@ impl PySubscription {
             subscription.try_recv().map_err(mcrx_error_to_py)
         })?;
 
-        packet.map(|packet| context_packet_to_py(py, packet)).transpose()
+        packet
+            .map(|packet| context_packet_to_py(py, packet))
+            .transpose()
     }
 
     fn recv_with_metadata_nowait(
@@ -419,11 +471,7 @@ impl PySubscription {
     }
 }
 
-#[pyclass(
-    module = "mcrx_core._mcrx_core",
-    name = "Packet",
-    skip_from_py_object
-)]
+#[pyclass(module = "mcrx_core._mcrx_core", name = "Packet", skip_from_py_object)]
 #[derive(Debug, Clone)]
 struct PyPacket {
     subscription_id: u64,
@@ -510,6 +558,7 @@ impl PyPacket {
 struct PyReceiveMetadata {
     socket_local_addr: Option<(String, u16)>,
     configured_interface: Option<String>,
+    configured_interface_index: Option<u32>,
     destination_local_ip: Option<String>,
     ingress_interface_index: Option<u32>,
 }
@@ -519,6 +568,7 @@ impl From<ReceiveMetadata> for PyReceiveMetadata {
         Self {
             socket_local_addr: opt_addr_to_tuple(metadata.socket_local_addr),
             configured_interface: metadata.configured_interface.map(|ip| ip.to_string()),
+            configured_interface_index: metadata.configured_interface_index,
             destination_local_ip: metadata.destination_local_ip.map(|ip| ip.to_string()),
             ingress_interface_index: metadata.ingress_interface_index,
         }
@@ -538,6 +588,11 @@ impl PyReceiveMetadata {
     }
 
     #[getter]
+    fn configured_interface_index(&self) -> Option<u32> {
+        self.configured_interface_index
+    }
+
+    #[getter]
     fn destination_local_ip(&self) -> Option<&str> {
         self.destination_local_ip.as_deref()
     }
@@ -549,9 +604,10 @@ impl PyReceiveMetadata {
 
     fn __repr__(&self) -> String {
         format!(
-            "ReceiveMetadata(socket_local_addr={:?}, configured_interface={:?}, destination_local_ip={:?}, ingress_interface_index={:?})",
+            "ReceiveMetadata(socket_local_addr={:?}, configured_interface={:?}, configured_interface_index={:?}, destination_local_ip={:?}, ingress_interface_index={:?})",
             self.socket_local_addr,
             self.configured_interface,
+            self.configured_interface_index,
             self.destination_local_ip,
             self.ingress_interface_index,
         )

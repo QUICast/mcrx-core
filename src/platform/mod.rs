@@ -48,10 +48,13 @@ fn resolve_ipv4_interface(config: &SubscriptionConfig) -> Result<Ipv4Addr, McrxE
 }
 
 fn resolve_ipv6_interface(config: &SubscriptionConfig) -> Result<u32, McrxError> {
-    match ipv6_membership(config)?.interface {
-        None => Ok(0),
-        Some(interface) if interface.is_unspecified() => Ok(0),
-        Some(interface) => resolve_ipv6_interface_index(interface),
+    let membership = ipv6_membership(config)?;
+
+    match (membership.interface_index, membership.interface) {
+        (Some(interface_index), _) => Ok(interface_index),
+        (None, None) => Ok(0),
+        (None, Some(interface)) if interface.is_unspecified() => Ok(0),
+        (None, Some(interface)) => resolve_ipv6_interface_index(interface),
     }
 }
 
@@ -172,6 +175,7 @@ impl ReceiveSocket {
         Ok(ReceiveMetadata {
             socket_local_addr: Some(self.local_addr()?),
             configured_interface: config.interface,
+            configured_interface_index: config.interface_index,
             destination_local_ip: None,
             ingress_interface_index: None,
         })

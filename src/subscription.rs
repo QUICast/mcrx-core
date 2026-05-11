@@ -5,9 +5,11 @@ use crate::metrics::SubscriptionMetricsSnapshot;
 use crate::packet::{Packet, PacketWithMetadata};
 use crate::platform::{ReceiveSocket, recv_packet, recv_packet_with_metadata, socket_local_addr};
 use socket2::Socket;
-#[cfg(feature = "metrics")]
-use std::cell::{Cell, RefCell};
 use std::net::SocketAddr;
+#[cfg(feature = "metrics")]
+use std::sync::Mutex;
+#[cfg(feature = "metrics")]
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 #[cfg(feature = "metrics")]
 use std::time::SystemTime;
 
@@ -42,17 +44,34 @@ pub struct SubscriptionParts {
 }
 
 #[cfg(feature = "metrics")]
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct SubscriptionMetricsInner {
-    packets_received: Cell<u64>,
-    bytes_received: Cell<u64>,
-    would_block_count: Cell<u64>,
-    receive_errors: Cell<u64>,
-    join_count: Cell<u64>,
-    leave_count: Cell<u64>,
-    last_payload_len: Cell<Option<usize>>,
-    last_source: RefCell<Option<SocketAddr>>,
-    last_receive_at: RefCell<Option<SystemTime>>,
+    packets_received: AtomicU64,
+    bytes_received: AtomicU64,
+    would_block_count: AtomicU64,
+    receive_errors: AtomicU64,
+    join_count: AtomicU64,
+    leave_count: AtomicU64,
+    last_payload_len: AtomicUsize,
+    last_source: Mutex<Option<SocketAddr>>,
+    last_receive_at: Mutex<Option<SystemTime>>,
+}
+
+#[cfg(feature = "metrics")]
+impl Default for SubscriptionMetricsInner {
+    fn default() -> Self {
+        Self {
+            packets_received: AtomicU64::new(0),
+            bytes_received: AtomicU64::new(0),
+            would_block_count: AtomicU64::new(0),
+            receive_errors: AtomicU64::new(0),
+            join_count: AtomicU64::new(0),
+            leave_count: AtomicU64::new(0),
+            last_payload_len: AtomicUsize::new(usize::MAX),
+            last_source: Mutex::new(None),
+            last_receive_at: Mutex::new(None),
+        }
+    }
 }
 
 /// Represents a registered subscription stored inside a context.
@@ -67,6 +86,14 @@ pub struct Subscription {
 }
 
 impl Subscription {
+    #[cfg(feature = "metrics")]
+    fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+        match mutex.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
     fn with_socket(id: SubscriptionId, config: SubscriptionConfig, socket: ReceiveSocket) -> Self {
         Self {
             id,
@@ -82,29 +109,27 @@ impl Subscription {
     fn record_received_packet(&self, packet: &Packet) {
         self.metrics
             .packets_received
-            .set(self.metrics.packets_received.get() + 1);
+            .fetch_add(1, Ordering::Relaxed);
         self.metrics
             .bytes_received
-            .set(self.metrics.bytes_received.get() + packet.payload.len() as u64);
+            .fetch_add(packet.payload.len() as u64, Ordering::Relaxed);
         self.metrics
             .last_payload_len
-            .set(Some(packet.payload.len()));
-        *self.metrics.last_source.borrow_mut() = Some(packet.source);
-        *self.metrics.last_receive_at.borrow_mut() = Some(SystemTime::now());
+            .store(packet.payload.len(), Ordering::Relaxed);
+        *Self::lock_unpoisoned(&self.metrics.last_source) = Some(packet.source);
+        *Self::lock_unpoisoned(&self.metrics.last_receive_at) = Some(SystemTime::now());
     }
 
     #[cfg(feature = "metrics")]
     fn record_would_block(&self) {
         self.metrics
             .would_block_count
-            .set(self.metrics.would_block_count.get() + 1);
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     #[cfg(feature = "metrics")]
     fn record_receive_error(&self) {
-        self.metrics
-            .receive_errors
-            .set(self.metrics.receive_errors.get() + 1);
+        self.metrics.receive_errors.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Creates a new subscription from an ID, configuration, and socket.
@@ -265,16 +290,21 @@ impl Subscription {
     /// compared against a later snapshot using `delta_since()`.
     #[cfg(feature = "metrics")]
     pub fn metrics_snapshot(&self) -> SubscriptionMetricsSnapshot {
+        let last_payload_len = match self.metrics.last_payload_len.load(Ordering::Relaxed) {
+            usize::MAX => None,
+            payload_len => Some(payload_len),
+        };
+
         SubscriptionMetricsSnapshot {
-            packets_received: self.metrics.packets_received.get(),
-            bytes_received: self.metrics.bytes_received.get(),
-            would_block_count: self.metrics.would_block_count.get(),
-            receive_errors: self.metrics.receive_errors.get(),
-            join_count: self.metrics.join_count.get(),
-            leave_count: self.metrics.leave_count.get(),
-            last_payload_len: self.metrics.last_payload_len.get(),
-            last_source: *self.metrics.last_source.borrow(),
-            last_receive_at: *self.metrics.last_receive_at.borrow(),
+            packets_received: self.metrics.packets_received.load(Ordering::Relaxed),
+            bytes_received: self.metrics.bytes_received.load(Ordering::Relaxed),
+            would_block_count: self.metrics.would_block_count.load(Ordering::Relaxed),
+            receive_errors: self.metrics.receive_errors.load(Ordering::Relaxed),
+            join_count: self.metrics.join_count.load(Ordering::Relaxed),
+            leave_count: self.metrics.leave_count.load(Ordering::Relaxed),
+            last_payload_len,
+            last_source: *Self::lock_unpoisoned(&self.metrics.last_source),
+            last_receive_at: *Self::lock_unpoisoned(&self.metrics.last_receive_at),
             captured_at: SystemTime::now(),
         }
     }
@@ -301,9 +331,7 @@ impl Subscription {
         self.state = SubscriptionState::Joined;
 
         #[cfg(feature = "metrics")]
-        self.metrics
-            .join_count
-            .set(self.metrics.join_count.get() + 1);
+        self.metrics.join_count.fetch_add(1, Ordering::Relaxed);
 
         Ok(())
     }
@@ -322,9 +350,7 @@ impl Subscription {
         self.state = SubscriptionState::Bound;
 
         #[cfg(feature = "metrics")]
-        self.metrics
-            .leave_count
-            .set(self.metrics.leave_count.get() + 1);
+        self.metrics.leave_count.fetch_add(1, Ordering::Relaxed);
 
         Ok(())
     }
@@ -377,6 +403,7 @@ mod tests {
             source: SourceFilter::Source(IpAddr::V4(interface)),
             dst_port: port,
             interface: Some(IpAddr::V4(interface)),
+            interface_index: None,
         }
     }
 
@@ -574,6 +601,10 @@ mod tests {
             )))
         );
         assert_eq!(packet.metadata.configured_interface, config.interface);
+        assert_eq!(
+            packet.metadata.configured_interface_index,
+            config.interface_index
+        );
     }
 
     #[test]

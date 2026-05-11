@@ -11,11 +11,11 @@ use mcrx_core::{
 use serde_json::{Map, Value, json};
 use std::env;
 #[cfg(feature = "metrics")]
-use std::fs;
+use std::fs::File;
 #[cfg(feature = "metrics")]
 use std::fs::OpenOptions;
 #[cfg(feature = "metrics")]
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::net::IpAddr;
 #[cfg(feature = "metrics")]
 use std::path::{Path, PathBuf};
@@ -70,12 +70,14 @@ fn run() -> Result<(), String> {
     let dst_port = parsed.dst_port;
     let source = parsed.source;
     let interface = parsed.interface;
+    let interface_index = parsed.interface_index;
 
     let mut config = match source {
         Some(source) => SubscriptionConfig::ssm_ip(group, source, dst_port),
         None => SubscriptionConfig::asm_ip(group, dst_port),
     };
     config.interface = interface;
+    config.interface_index = interface_index;
 
     let mut ctx = Context::new();
     let subscription_id = ctx
@@ -88,7 +90,10 @@ fn run() -> Result<(), String> {
     println!("  group:      {group}");
     println!("  dst_port:   {dst_port}");
     println!("  source:     {}", source_string(source));
-    println!("  interface:  {}", interface_string(interface));
+    println!(
+        "  interface:  {}",
+        interface_string(interface, interface_index)
+    );
     println!("  sub_id:     {}", subscription_id.0);
 
     println!();
@@ -98,7 +103,7 @@ fn run() -> Result<(), String> {
     let summary_interval = summary_interval_from_env();
     #[cfg(feature = "metrics")]
     let summary_output =
-        summary_output_from_env(group, dst_port, source, interface)?;
+        summary_output_from_env(group, dst_port, source, interface, interface_index)?;
     #[cfg(feature = "metrics")]
     let mut metrics_sampler = ContextMetricsSampler::new();
     #[cfg(feature = "metrics")]
@@ -146,16 +151,15 @@ fn run() -> Result<(), String> {
 
             if let Some(hardware_sampler) = hardware_metrics_sampler.as_mut()
                 && let Some(hardware_snapshot) = capture_hardware_metrics_snapshot()?
+                && let Some(delta) = hardware_sampler.sample(hardware_snapshot.clone())
             {
-                if let Some(delta) = hardware_sampler.sample(hardware_snapshot.clone()) {
-                    if let Some(output) = &summary_output {
-                        write_hardware_metrics_summary_jsonl(&hardware_snapshot, &delta, output)
-                            .map_err(|err| {
-                                format!("failed to write hardware metrics summary: {err}")
-                            })?;
-                    } else {
-                        print_hardware_metrics_summary(&hardware_snapshot, &delta);
-                    }
+                if let Some(output) = &summary_output {
+                    write_hardware_metrics_summary_jsonl(&hardware_snapshot, &delta, output)
+                        .map_err(|err| {
+                            format!("failed to write hardware metrics summary: {err}")
+                        })?;
+                } else {
+                    print_hardware_metrics_summary(&hardware_snapshot, &delta);
                 }
             }
 
@@ -171,10 +175,14 @@ fn source_string(source: Option<IpAddr>) -> String {
     }
 }
 
-fn interface_string(interface: Option<IpAddr>) -> String {
-    match interface {
-        Some(interface) => interface.to_string(),
-        None => "default".to_string(),
+fn interface_string(interface: Option<IpAddr>, interface_index: Option<u32>) -> String {
+    match (interface, interface_index) {
+        (Some(IpAddr::V6(interface)), Some(interface_index)) => {
+            format!("{interface}%{interface_index}")
+        }
+        (Some(interface), _) => interface.to_string(),
+        (None, Some(interface_index)) => format!("ifindex:{interface_index}"),
+        (None, None) => "default".to_string(),
     }
 }
 
@@ -230,7 +238,7 @@ fn summary_file_from_env() -> Option<PathBuf> {
 }
 
 #[cfg(feature = "metrics")]
-fn hardware_summary_file_path(network_path: &PathBuf) -> PathBuf {
+fn hardware_summary_file_path(network_path: &Path) -> PathBuf {
     let parent = network_path.parent().map(PathBuf::from).unwrap_or_default();
     let stem = network_path
         .file_stem()
@@ -297,9 +305,13 @@ fn build_receiver_metrics_flags(
     dst_port: u16,
     source: Option<IpAddr>,
     interface: Option<IpAddr>,
+    interface_index: Option<u32>,
 ) -> Result<Map<String, Value>, String> {
     let mut flags = Map::new();
-    flags.insert("transport".to_string(), Value::String("udp-multicast".to_string()));
+    flags.insert(
+        "transport".to_string(),
+        Value::String("udp-multicast".to_string()),
+    );
     flags.insert("role".to_string(), Value::String("receiver".to_string()));
     flags.insert(
         "multicast_group".to_string(),
@@ -308,7 +320,7 @@ fn build_receiver_metrics_flags(
     flags.insert("multicast_port".to_string(), json!(dst_port));
     flags.insert(
         "multicast_interface".to_string(),
-        Value::String(interface_string(interface)),
+        Value::String(interface_string(interface, interface_index)),
     );
     flags.insert(
         "join_mode".to_string(),
@@ -344,14 +356,16 @@ fn summary_output_from_env(
     dst_port: u16,
     source: Option<IpAddr>,
     interface: Option<IpAddr>,
+    interface_index: Option<u32>,
 ) -> Result<Option<MetricsJsonlOutputConfig>, String> {
     let Some(network_path) = summary_file_from_env() else {
         return Ok(None);
     };
 
     Ok(Some(MetricsJsonlOutputConfig {
-        node_id: metrics_node_id_from_env().unwrap_or_else(|| infer_node_id_from_path(&network_path)),
-        flags: build_receiver_metrics_flags(group, dst_port, source, interface)?,
+        node_id: metrics_node_id_from_env()
+            .unwrap_or_else(|| infer_node_id_from_path(&network_path)),
+        flags: build_receiver_metrics_flags(group, dst_port, source, interface, interface_index)?,
         network_path,
     }))
 }
@@ -416,16 +430,45 @@ fn header_json(
 
 #[cfg(feature = "metrics")]
 fn first_non_empty_line(path: &Path) -> Result<Option<String>, std::io::Error> {
-    let contents = match fs::read_to_string(path) {
-        Ok(contents) => contents,
+    let file = match File::open(path) {
+        Ok(file) => file,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(err),
     };
 
-    Ok(contents
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .map(str::to_string))
+    let reader = BufReader::new(file);
+
+    for line in reader.lines() {
+        let line = line?;
+        if !line.trim().is_empty() {
+            return Ok(Some(line));
+        }
+    }
+
+    Ok(None)
+}
+
+#[cfg(feature = "metrics")]
+fn validate_existing_header(existing: &Value, expected: &Value) -> Result<(), std::io::Error> {
+    let schema = existing.get("schema").and_then(Value::as_str);
+    let artifact_type = existing.get("artifact_type").and_then(Value::as_str);
+    if schema != Some(HEIMDALL_JSONL_SCHEMA) || artifact_type.is_none() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "existing JSONL file does not start with a Heimdall header object",
+        ));
+    }
+
+    for field in ["artifact_type", "node_id", "producer", "flags"] {
+        if existing.get(field) != expected.get(field) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("existing JSONL header field '{field}' does not match current run"),
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(feature = "metrics")]
@@ -438,22 +481,11 @@ fn ensure_single_header(path: &Path, header: &Value) -> Result<(), std::io::Erro
                     format!("existing JSONL header is invalid JSON: {err}"),
                 )
             })?;
-
-            let schema = parsed.get("schema").and_then(Value::as_str);
-            let artifact_type = parsed.get("artifact_type").and_then(Value::as_str);
-            if schema != Some(HEIMDALL_JSONL_SCHEMA) || artifact_type.is_none() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "existing JSONL file does not start with a Heimdall header object",
-                ));
-            }
-
-            Ok(())
+            validate_existing_header(&parsed, header)
         }
         None => {
             let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-            serde_json::to_writer(&mut file, header)
-                .map_err(std::io::Error::other)?;
+            serde_json::to_writer(&mut file, header).map_err(std::io::Error::other)?;
             file.write_all(b"\n")?;
             Ok(())
         }
@@ -647,6 +679,8 @@ fn print_usage(program: &str) {
     eprintln!("  {program} 232.1.2.3 5000 192.168.1.10 192.168.1.20");
     eprintln!("  {program} ff01::1234 5000");
     eprintln!("  {program} ff01::1234 5000 --interface ::1");
+    eprintln!("  {program} ff32::8000:1234 5000 --interface fe80::1%7");
+    eprintln!("  {program} ff3e::8000:1234 5000 --interface 7");
     eprintln!("  {program} ff31::8000:1234 5000 <sender-ipv6> --interface <receiver-ipv6>");
     eprintln!();
     eprintln!("Notes:");
@@ -656,6 +690,9 @@ fn print_usage(program: &str) {
         "  - use --interface for ASM when you want to set the join interface without also setting a source"
     );
     eprintln!("  - <interface> selects the local join interface address");
+    eprintln!(
+        "  - for IPv6, <interface> may also be a scoped address like fe80::1%7 or a numeric interface index"
+    );
     eprintln!("  - for IPv6 SSM, use ff3x::/32 groups such as ff31::8000:1234 or ff3e::8000:1234");
     eprintln!("  - for link-local IPv6 SSM groups such as ff32::/16, send from a fe80:: source");
 
@@ -664,8 +701,12 @@ fn print_usage(program: &str) {
         eprintln!();
         eprintln!("Metrics (when built with --features metrics):");
         eprintln!("  MCRX_METRICS_SUMMARY_SECS=<n>   emit a delta metrics summary every n seconds");
-        eprintln!("  MCRX_METRICS_NODE_ID=<id>       override JSONL header node_id (defaults to parent dir, then file stem)");
-        eprintln!("  MCRX_METRICS_FLAGS_JSON=<json>  merge extra JSON object fields into the header flags map");
+        eprintln!(
+            "  MCRX_METRICS_NODE_ID=<id>       override JSONL header node_id (defaults to parent dir, then file stem)"
+        );
+        eprintln!(
+            "  MCRX_METRICS_FLAGS_JSON=<json>  merge extra JSON object fields into the header flags map"
+        );
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         eprintln!(
             "  MCRX_METRICS_SUMMARY_FILE=<p>   write single-header JSONL network metrics to <p> and process hardware metrics to a sibling *_hardware file"
@@ -821,5 +862,76 @@ mod tests {
     fn node_id_inference_prefers_parent_dir_over_file_stem() {
         let path = PathBuf::from("/tmp/client-0001/network-metrics.jsonl");
         assert_eq!(infer_node_id_from_path(&path), "client-0001");
+    }
+
+    #[test]
+    fn metrics_jsonl_rejects_mismatched_existing_header_metadata() {
+        let parent = std::env::temp_dir().join(format!(
+            "mcrx_recv_metrics_mismatch_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or(Duration::ZERO)
+                .as_nanos()
+        ));
+        fs::create_dir_all(&parent).unwrap();
+        let path = parent.join("network_metrics.jsonl");
+
+        let stale_header = json!({
+            "schema": HEIMDALL_JSONL_SCHEMA,
+            "artifact_type": NETWORK_ARTIFACT_TYPE,
+            "node_id": "old-node",
+            "producer": RECEIVER_PRODUCER,
+            "created_at": 1.0,
+            "flags": {
+                "role": "receiver",
+                "multicast_group": "239.1.2.3",
+            }
+        });
+        fs::write(&path, format!("{stale_header}\n")).unwrap();
+
+        let mut flags = Map::new();
+        flags.insert("role".to_string(), Value::String("receiver".to_string()));
+        flags.insert(
+            "multicast_group".to_string(),
+            Value::String("239.1.2.99".to_string()),
+        );
+        let output = MetricsJsonlOutputConfig {
+            node_id: "client-0002".to_string(),
+            flags,
+            network_path: path.clone(),
+        };
+
+        let snapshot = ContextMetricsSnapshot {
+            subscriptions_added: 1,
+            subscriptions_removed: 0,
+            active_subscriptions: 1,
+            joined_subscriptions: 1,
+            total_packets_received: 1,
+            total_bytes_received: 10,
+            total_would_block_count: 0,
+            total_receive_errors: 0,
+            total_join_count: 1,
+            total_leave_count: 0,
+            batch_calls: 1,
+            batch_packets_received: 1,
+            captured_at: SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+        };
+        let delta = ContextMetricsDelta {
+            interval_secs: 1.0,
+            packets_received: 1,
+            bytes_received: 10,
+            would_block_count: 0,
+            receive_errors: 0,
+            join_count: 1,
+            leave_count: 0,
+            batch_calls: 1,
+            batch_packets_received: 1,
+        };
+
+        let err = write_metrics_summary_jsonl(&snapshot, &delta, &output).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir(parent);
     }
 }
