@@ -6,6 +6,7 @@ use pyo3::exceptions::{PyLookupError, PyOSError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyModule};
 use std::cell::RefCell;
+use std::ffi::CString;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::rc::Rc;
 
@@ -41,6 +42,51 @@ fn parse_optional_ip_addr(raw: Option<&str>, field: &'static str) -> PyResult<Op
     raw.map(|value| parse_ip_addr(value, field)).transpose()
 }
 
+fn parse_interface_scope(raw: &str) -> PyResult<u32> {
+    if raw.chars().all(|ch| ch.is_ascii_digit()) {
+        let scope = raw
+            .parse::<u32>()
+            .map_err(|_| invalid_argument(format!("invalid interface scope index: {raw}")))?;
+        if scope == 0 {
+            return Err(invalid_argument("interface scope index must not be 0"));
+        }
+        return Ok(scope);
+    }
+
+    interface_name_to_index(raw)
+}
+
+fn interface_name_to_index(raw: &str) -> PyResult<u32> {
+    let raw = CString::new(raw)
+        .map_err(|_| invalid_argument("interface name must not contain NUL bytes"))?;
+
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::NetworkManagement::IpHelper::if_nametoindex;
+
+        let index = if_nametoindex(raw.as_ptr().cast());
+        if index == 0 {
+            return Err(invalid_argument(format!(
+                "unknown interface name: {}",
+                raw.to_string_lossy()
+            )));
+        }
+        Ok(index)
+    }
+
+    #[cfg(not(windows))]
+    unsafe {
+        let index = libc::if_nametoindex(raw.as_ptr());
+        if index == 0 {
+            return Err(invalid_argument(format!(
+                "unknown interface name: {}",
+                raw.to_string_lossy()
+            )));
+        }
+        Ok(index)
+    }
+}
+
 fn parse_interface_selector(
     group: IpAddr,
     raw: Option<&str>,
@@ -54,16 +100,12 @@ fn parse_interface_selector(
             let addr = addr
                 .parse::<Ipv6Addr>()
                 .map_err(|_| invalid_argument(format!("invalid interface IP address: {raw}")))?;
-            let scope = scope
-                .parse::<u32>()
-                .map_err(|_| invalid_argument(format!("invalid interface scope index: {scope}")))?;
+            let scope = parse_interface_scope(scope)?;
             return Ok((Some(IpAddr::V6(addr)), Some(scope)));
         }
 
         if raw.chars().all(|ch| ch.is_ascii_digit()) {
-            let scope = raw
-                .parse::<u32>()
-                .map_err(|_| invalid_argument(format!("invalid interface scope index: {raw}")))?;
+            let scope = parse_interface_scope(raw)?;
             return Ok((None, Some(scope)));
         }
     }

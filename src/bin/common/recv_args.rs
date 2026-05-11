@@ -1,3 +1,4 @@
+use std::ffi::CString;
 use std::net::IpAddr;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,27 +132,57 @@ fn parse_interface_value(group: IpAddr, value: &str) -> Result<ParsedInterface, 
             let addr = addr
                 .parse::<std::net::Ipv6Addr>()
                 .map_err(|err| format!("invalid interface '{value}': {err}"))?;
-            let scope = scope
-                .parse::<u32>()
-                .map_err(|err| format!("invalid interface scope '{scope}': {err}"))?;
-            if scope == 0 {
-                return Err("interface scope index must not be 0".to_string());
-            }
+            let scope = parse_interface_scope(scope)?;
             return Ok((Some(IpAddr::V6(addr)), Some(scope)));
         }
 
         if value.chars().all(|ch| ch.is_ascii_digit()) {
-            let scope = value
-                .parse::<u32>()
-                .map_err(|err| format!("invalid interface index '{value}': {err}"))?;
-            if scope == 0 {
-                return Err("interface index must not be 0".to_string());
-            }
+            let scope = parse_interface_scope(value)?;
             return Ok((None, Some(scope)));
         }
     }
 
     Ok((Some(parse_ip("interface", value)?), None))
+}
+
+fn parse_interface_scope(value: &str) -> Result<u32, String> {
+    if value.chars().all(|ch| ch.is_ascii_digit()) {
+        let scope = value
+            .parse::<u32>()
+            .map_err(|err| format!("invalid interface index '{value}': {err}"))?;
+        if scope == 0 {
+            return Err("interface index must not be 0".to_string());
+        }
+        return Ok(scope);
+    }
+
+    interface_name_to_index(value)
+        .map_err(|err| format!("invalid interface scope '{value}': {err}"))
+}
+
+fn interface_name_to_index(name: &str) -> Result<u32, String> {
+    let name =
+        CString::new(name).map_err(|_| "interface name must not contain NUL bytes".to_string())?;
+
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::NetworkManagement::IpHelper::if_nametoindex;
+
+        let index = if_nametoindex(name.as_ptr().cast());
+        if index == 0 {
+            return Err("unknown interface name".to_string());
+        }
+        Ok(index)
+    }
+
+    #[cfg(not(windows))]
+    unsafe {
+        let index = libc::if_nametoindex(name.as_ptr());
+        if index == 0 {
+            return Err("unknown interface name".to_string());
+        }
+        Ok(index)
+    }
 }
 
 fn parse_port(value: &str) -> Result<u16, String> {
@@ -278,6 +309,46 @@ mod tests {
             Some(IpAddr::V6("fe80::1".parse().unwrap()))
         );
         assert_eq!(parsed.interface_index, Some(7));
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    #[test]
+    fn parses_scoped_ipv6_interface_with_name() {
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd",
+            target_os = "dragonfly"
+        ))]
+        const LOOPBACK_INTERFACE: &str = "lo0";
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        const LOOPBACK_INTERFACE: &str = "lo";
+
+        let scoped_interface = format!("fe80::1%{LOOPBACK_INTERFACE}");
+        let args = argv(&[
+            "mcrx-recv-meta",
+            "ff32::8000:1234",
+            "5000",
+            "--interface",
+            &scoped_interface,
+        ]);
+
+        let parsed = parse_receive_cli_args(&args).unwrap();
+
+        assert_eq!(
+            parsed.interface,
+            Some(IpAddr::V6("fe80::1".parse().unwrap()))
+        );
+        assert!(parsed.interface_index.unwrap() > 0);
     }
 
     #[test]

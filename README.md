@@ -154,6 +154,8 @@ Basic receiver:
 ```bash
 cargo run --bin mcrx_recv -- 239.1.2.3 5000
 cargo run --bin mcrx_recv -- ff01::1234 5000 --interface ::1
+cargo run --bin mcrx_recv -- ff32::8000:1234 5000 --interface fe80::1%en0
+cargo run --bin mcrx_recv -- ff3e::8000:1234 5000 --interface 7
 ```
 
 Sender:
@@ -174,6 +176,7 @@ Metadata inspection receiver:
 ```bash
 cargo run --bin mcrx_recv_meta -- 239.1.2.3 5000
 cargo run --bin mcrx_recv_meta -- ff01::1234 5000 --interface ::1
+cargo run --bin mcrx_recv_meta -- ff32::8000:1234 5000 --interface fe80::1%en0
 cargo run --bin mcrx_recv_meta -- ff31::8000:1234 5000 fd06:ba51:f296:0:1caf:6b66:e6f7:4b10 --interface fd06:ba51:f296:0:1caf:6b66:e6f7:4b10
 ```
 
@@ -195,6 +198,9 @@ For receivers:
 - the `interface` is the receiver's local join interface
 - on one machine those may be the same
 - across machines they usually differ
+- for IPv6 ASM or SSM, the receiver CLIs accept `--interface ::1`,
+  `--interface fe80::1%7`, `--interface fe80::1%en0`, or a bare interface
+  index such as `--interface 7`
 
 For senders:
 

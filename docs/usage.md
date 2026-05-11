@@ -37,8 +37,8 @@ config.interface_index = Some(7);
 
 The demo receiver binaries also support an explicit ASM interface override via
 `--interface`, for example `mcrx_recv_meta ff01::1234 5000 --interface ::1`.
-For IPv6, `--interface` can also be a scoped address like `fe80::1%7` or a
-numeric interface index like `7`.
+For IPv6, `--interface` can also be a scoped address like `fe80::1%7` or
+`fe80::1%en0`, or a numeric interface index like `7`.
 
 `SubscriptionConfig` can represent either IPv4 or IPv6 addresses. The active
 receive path supports IPv4 and IPv6 ASM/SSM. The metadata-aware receive APIs

@@ -152,6 +152,7 @@ fn print_usage(program: &str) {
     eprintln!("examples:");
     eprintln!("  {program} ff01::1234 5000 --interface ::1");
     eprintln!("  {program} ff32::8000:1234 5000 --interface fe80::1%7");
+    eprintln!("  {program} ff32::8000:1234 5000 --interface fe80::1%en0");
     eprintln!("  {program} ff3e::8000:1234 5000 --interface 7");
     eprintln!("  {program} ff31::8000:1234 5000 <sender-ipv6> --interface <receiver-ipv6>");
     eprintln!(

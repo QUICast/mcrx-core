@@ -680,6 +680,7 @@ fn print_usage(program: &str) {
     eprintln!("  {program} ff01::1234 5000");
     eprintln!("  {program} ff01::1234 5000 --interface ::1");
     eprintln!("  {program} ff32::8000:1234 5000 --interface fe80::1%7");
+    eprintln!("  {program} ff32::8000:1234 5000 --interface fe80::1%en0");
     eprintln!("  {program} ff3e::8000:1234 5000 --interface 7");
     eprintln!("  {program} ff31::8000:1234 5000 <sender-ipv6> --interface <receiver-ipv6>");
     eprintln!();
@@ -691,7 +692,7 @@ fn print_usage(program: &str) {
     );
     eprintln!("  - <interface> selects the local join interface address");
     eprintln!(
-        "  - for IPv6, <interface> may also be a scoped address like fe80::1%7 or a numeric interface index"
+        "  - for IPv6, <interface> may also be a scoped address like fe80::1%7 or fe80::1%en0, or a numeric interface index"
     );
     eprintln!("  - for IPv6 SSM, use ff3x::/32 groups such as ff31::8000:1234 or ff3e::8000:1234");
     eprintln!("  - for link-local IPv6 SSM groups such as ff32::/16, send from a fe80:: source");

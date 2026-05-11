@@ -14,8 +14,39 @@ def _send_ipv4_multicast(group: str, port: int, payload: bytes) -> None:
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP) as sock:
         sock.sendto(payload, (group, port))
 
+def _existing_interface_name() -> str:
+    names = socket.if_nameindex()
+    if not names:
+        raise unittest.SkipTest("no network interfaces available")
+
+    for _index, name in names:
+        lowered = name.lower()
+        if name in ("lo", "lo0") or "loopback" in lowered:
+            return name
+
+    return names[0][1]
+
 
 class BindingsTest(unittest.TestCase):
+    def test_add_subscription_parses_numeric_ipv6_interface_index(self) -> None:
+        ctx = Context()
+        sub = ctx.add_subscription("ff3e::8000:1234", 55129, interface="7")
+
+        self.assertIsNone(sub.interface)
+        self.assertEqual(sub.interface_index, 7)
+
+    def test_add_subscription_parses_scoped_ipv6_interface_name(self) -> None:
+        ctx = Context()
+        interface_name = _existing_interface_name()
+        sub = ctx.add_subscription(
+            "ff32::8000:1234",
+            55128,
+            interface=f"fe80::1%{interface_name}",
+        )
+
+        self.assertEqual(sub.interface, "fe80::1")
+        self.assertEqual(sub.interface_index, socket.if_nametoindex(interface_name))
+
     def test_context_subscription_receives_packet(self) -> None:
         ctx = Context()
         sub = ctx.add_subscription("239.1.2.3", 55130)
