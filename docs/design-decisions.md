@@ -83,11 +83,6 @@ the library keeps those choices explicit in the public model:
 Those are deliberately separate because cross-machine IPv6 SSM usually needs
 both values, and they are often different.
 
-The demo sender mirrors that philosophy for IPv6 by binding to the exact local
-IPv6 address passed by the caller, rather than only setting an outgoing
-interface index and leaving source-address selection to the kernel. That makes
-SSM tests and integrations much more predictable.
-
 ## Optional Receive Metadata
 
 The original `Packet` type stays small and stable for callers that only need

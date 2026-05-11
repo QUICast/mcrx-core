@@ -2,10 +2,9 @@
 
 ## Overview
 
-The repository provides four small demo binaries:
+The repository provides three receiver-focused demo binaries:
 
 - `mcrx_recv`
-- `mcrx_send`
 - `mcrx_tokio_recv` (with `--features tokio`)
 - `mcrx_recv_meta`
 
@@ -34,32 +33,6 @@ Argument meaning:
 - `dst_port` → destination UDP port
 - `source` → optional SSM source address
 - `interface` → optional local interface address
-
-## Sender
-
-```bash
-cargo run --bin mcrx_send -- <group> <dst_port> <message> [interval_ms] [interface]
-```
-
-Examples:
-
-```bash
-cargo run --bin mcrx_send -- 239.1.2.3 5000 hello
-cargo run --bin mcrx_send -- 239.1.2.3 5000 hello 1000
-cargo run --bin mcrx_send -- 232.1.2.3 5000 hello 1000 192.168.1.20
-cargo run --bin mcrx_send -- ff01::1234 5000 hello 1000 ::1
-cargo run --bin mcrx_send -- ff01::1234 5000 hello 1000 1
-cargo run --bin mcrx_send -- ff31::8000:1234 5000 hello 1000 fd06:ba51:f296:0:1caf:6b66:e6f7:4b10
-cargo run --bin mcrx_send -- ff3e::8000:1234 5000 hello 1000 fd06:ba51:f296:0:1caf:6b66:e6f7:4b10
-```
-
-For IPv6, the optional `interface` argument may be either a local IPv6 address
-or a numeric interface index.
-
-When the IPv6 `interface` argument is an IPv6 address, `mcrx_send` binds the
-socket to that exact local address and also selects the corresponding outgoing
-multicast interface. That is especially important for SSM, because the receive
-side filters on the exact sender source IP.
 
 ## Tokio Receiver
 
@@ -102,15 +75,12 @@ cargo run --bin mcrx_recv_meta -- ff3e::8000:1234 5000 <sender-ipv6> --interface
 - The mixed form `mcrx_recv_meta <group> <port> <source> --interface <iface>`
   is supported and is often the clearest way to spell IPv6 SSM.
 - `ff32::/16` is link-local scope. If you use it, send from a link-local
-  `fe80::...` address rather than a ULA or global source.
+  `fe80::...` source on the transmitting host rather than a ULA or global
+  source.
 
 Cross-machine IPv6 SSM example:
 
 ```bash
-# sender
-cargo run --bin mcrx_send -- ff3e::8000:1234 5000 hello-v6 1000 <sender-ipv6>
-
-# receiver
 cargo run --bin mcrx_recv_meta -- ff3e::8000:1234 5000 <sender-ipv6> --interface <receiver-ipv6>
 ```
 

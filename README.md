@@ -158,13 +158,6 @@ cargo run --bin mcrx_recv -- ff32::8000:1234 5000 --interface fe80::1%en0
 cargo run --bin mcrx_recv -- ff3e::8000:1234 5000 --interface 7
 ```
 
-Sender:
-
-```bash
-cargo run --bin mcrx_send -- 239.1.2.3 5000 hello
-cargo run --bin mcrx_send -- ff01::1234 5000 hello 1000 ::1
-```
-
 Tokio receiver:
 
 ```bash
@@ -202,30 +195,21 @@ For receivers:
   `--interface fe80::1%7`, `--interface fe80::1%en0`, or a bare interface
   index such as `--interface 7`
 
-For senders:
-
-- when you pass an IPv6 address to `mcrx_send`, the sender binds to that exact
-  local IPv6 address and also selects the corresponding multicast interface
-- this matters for SSM, because the receiver filters on the exact packet source
-- for link-local SSM groups such as `ff32::/16`, send from a link-local
-  `fe80::...` source
-- for wider-scope groups such as `ff35::/16` or `ff3e::/16`, use a ULA or
-  global IPv6 source that is valid on that network
+The configured `source` must match the actual packet source chosen by whatever
+sender you use. For link-local SSM groups such as `ff32::/16`, that usually
+means a link-local `fe80::...` source on the transmitting host. For wider
+scopes such as `ff35::/16` or `ff3e::/16`, use a ULA or global IPv6 source
+that is valid on that network.
 
 Same-host IPv6 SSM example:
 
 ```bash
 cargo run --bin mcrx_recv_meta -- ff31::8000:1234 5000 fd06:ba51:f296:0:1caf:6b66:e6f7:4b10 --interface fd06:ba51:f296:0:1caf:6b66:e6f7:4b10
-cargo run --bin mcrx_send -- ff31::8000:1234 5000 hello-v6 1000 fd06:ba51:f296:0:1caf:6b66:e6f7:4b10
 ```
 
 Cross-machine IPv6 SSM example on the same network:
 
 ```bash
-# sender host
-cargo run --bin mcrx_send -- ff3e::8000:1234 5000 hello-v6 1000 <sender-ipv6>
-
-# receiver host
 cargo run --bin mcrx_recv_meta -- ff3e::8000:1234 5000 <sender-ipv6> --interface <receiver-ipv6>
 ```
 

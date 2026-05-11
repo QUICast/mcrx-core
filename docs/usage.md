@@ -79,19 +79,14 @@ The receiver binaries accept the same split explicitly:
 cargo run --bin mcrx_recv_meta -- ff3e::8000:1234 5000 <sender-ipv6> --interface <receiver-ipv6>
 ```
 
-For IPv6 senders, the demo binary treats an IPv6 interface address as both:
-
-- the local source address to bind to
-- the interface to use for multicast transmission
-
-That behavior is intentional for SSM, because the receiver filters on the exact
-packet source IP. If the sender only chose an interface and let the kernel pick
-another source address, the packet could be dropped by the SSM filter.
+The configured `source` must match the actual packet source chosen by the
+transmitting application. If the sender chooses a different source address than
+the receiver expects, the packet can be dropped by the SSM filter.
 
 One practical rule:
 
 - for link-local multicast groups such as `ff32::/16`, send from a link-local
-  `fe80::...` source
+  `fe80::...` source on the transmitting host
 - for wider-scope groups such as `ff35::/16` or `ff3e::/16`, use a ULA or
   global IPv6 source that is valid on that network
 
