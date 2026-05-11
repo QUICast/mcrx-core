@@ -1,6 +1,11 @@
 #[path = "common/recv_args.rs"]
 mod recv_args;
 
+#[cfg(feature = "metrics")]
+use mcrx_core::jsonl::{
+    HARDWARE_ARTIFACT_TYPE, HEIMDALL_JSONL_SCHEMA, MetricsJsonlOutputConfig, NETWORK_ARTIFACT_TYPE,
+    append_jsonl_sample_row, header_json, infer_node_id_from_path, unix_timestamp_secs,
+};
 use mcrx_core::{Context, SubscriptionConfig};
 #[cfg(feature = "metrics")]
 use mcrx_core::{
@@ -10,12 +15,6 @@ use mcrx_core::{
 #[cfg(feature = "metrics")]
 use serde_json::{Map, Value, json};
 use std::env;
-#[cfg(feature = "metrics")]
-use std::fs::File;
-#[cfg(feature = "metrics")]
-use std::fs::OpenOptions;
-#[cfg(feature = "metrics")]
-use std::io::{BufRead, BufReader, Write};
 use std::net::IpAddr;
 #[cfg(feature = "metrics")]
 use std::path::{Path, PathBuf};
@@ -23,26 +22,12 @@ use std::process;
 use std::thread;
 use std::time::Duration;
 #[cfg(feature = "metrics")]
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, UNIX_EPOCH};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const MAX_PREVIEW_LEN: usize = 64;
 #[cfg(feature = "metrics")]
-const HEIMDALL_JSONL_SCHEMA: &str = "heimdall-jsonl-v1";
-#[cfg(feature = "metrics")]
-const NETWORK_ARTIFACT_TYPE: &str = "mcrx-network";
-#[cfg(feature = "metrics")]
-const HARDWARE_ARTIFACT_TYPE: &str = "process-hardware";
-#[cfg(feature = "metrics")]
 const RECEIVER_PRODUCER: &str = "mcrx-core/mcrx_recv";
-
-#[cfg(feature = "metrics")]
-#[derive(Debug, Clone)]
-struct MetricsJsonlOutputConfig {
-    network_path: PathBuf,
-    node_id: String,
-    flags: Map<String, Value>,
-}
 
 fn main() {
     if let Err(err) = run() {
@@ -255,22 +240,6 @@ fn hardware_summary_file_path(network_path: &Path) -> PathBuf {
 }
 
 #[cfg(feature = "metrics")]
-fn infer_node_id_from_path(path: &Path) -> String {
-    path.parent()
-        .and_then(Path::file_name)
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            path.file_stem()
-                .and_then(|stem| stem.to_str())
-                .filter(|stem| !stem.is_empty())
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| "unknown".to_string())
-}
-
-#[cfg(feature = "metrics")]
 fn metrics_node_id_from_env() -> Option<String> {
     env::var("MCRX_METRICS_NODE_ID")
         .ok()
@@ -401,109 +370,6 @@ fn capture_hardware_metrics_snapshot() -> Result<Option<HardwareMetricsSnapshot>
     {
         Ok(None)
     }
-}
-
-#[cfg(feature = "metrics")]
-fn unix_timestamp_secs(time: SystemTime) -> f64 {
-    time.duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs_f64())
-        .unwrap_or(0.0)
-}
-
-#[cfg(feature = "metrics")]
-fn header_json(
-    artifact_type: &'static str,
-    producer: &'static str,
-    node_id: &str,
-    created_at: SystemTime,
-    flags: &Map<String, Value>,
-) -> Value {
-    json!({
-        "schema": HEIMDALL_JSONL_SCHEMA,
-        "artifact_type": artifact_type,
-        "node_id": node_id,
-        "producer": producer,
-        "created_at": unix_timestamp_secs(created_at),
-        "flags": Value::Object(flags.clone()),
-    })
-}
-
-#[cfg(feature = "metrics")]
-fn first_non_empty_line(path: &Path) -> Result<Option<String>, std::io::Error> {
-    let file = match File::open(path) {
-        Ok(file) => file,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(err),
-    };
-
-    let reader = BufReader::new(file);
-
-    for line in reader.lines() {
-        let line = line?;
-        if !line.trim().is_empty() {
-            return Ok(Some(line));
-        }
-    }
-
-    Ok(None)
-}
-
-#[cfg(feature = "metrics")]
-fn validate_existing_header(existing: &Value, expected: &Value) -> Result<(), std::io::Error> {
-    let schema = existing.get("schema").and_then(Value::as_str);
-    let artifact_type = existing.get("artifact_type").and_then(Value::as_str);
-    if schema != Some(HEIMDALL_JSONL_SCHEMA) || artifact_type.is_none() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "existing JSONL file does not start with a Heimdall header object",
-        ));
-    }
-
-    for field in ["artifact_type", "node_id", "producer", "flags"] {
-        if existing.get(field) != expected.get(field) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("existing JSONL header field '{field}' does not match current run"),
-            ));
-        }
-    }
-
-    Ok(())
-}
-
-#[cfg(feature = "metrics")]
-fn ensure_single_header(path: &Path, header: &Value) -> Result<(), std::io::Error> {
-    match first_non_empty_line(path)? {
-        Some(line) => {
-            let parsed: Value = serde_json::from_str(&line).map_err(|err| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("existing JSONL header is invalid JSON: {err}"),
-                )
-            })?;
-            validate_existing_header(&parsed, header)
-        }
-        None => {
-            let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-            serde_json::to_writer(&mut file, header).map_err(std::io::Error::other)?;
-            file.write_all(b"\n")?;
-            Ok(())
-        }
-    }
-}
-
-#[cfg(feature = "metrics")]
-fn append_jsonl_sample_row(
-    path: &Path,
-    header: &Value,
-    sample: &Value,
-) -> Result<(), std::io::Error> {
-    ensure_single_header(path, header)?;
-
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    serde_json::to_writer(&mut file, sample).map_err(std::io::Error::other)?;
-    file.write_all(b"\n")?;
-    Ok(())
 }
 
 #[cfg(feature = "metrics")]

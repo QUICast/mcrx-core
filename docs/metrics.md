@@ -84,6 +84,9 @@ These are computed from delta counters divided by the sampled interval.
 - terminal summaries
 - JSONL file output
 
+The reusable single-header JSONL helper is also exported as
+`mcrx_core::jsonl` when the `metrics` feature is enabled.
+
 Configured via:
 
 - `MCRX_METRICS_SUMMARY_SECS`
@@ -92,6 +95,16 @@ Configured via:
 - `MCRX_METRICS_FLAGS_JSON`
 
 ## JSONL Schema
+
+The library helper lives in `mcrx_core::jsonl` and provides:
+
+- `MetricsJsonlOutputConfig`
+- `HEIMDALL_JSONL_SCHEMA`
+- `NETWORK_ARTIFACT_TYPE`
+- `HARDWARE_ARTIFACT_TYPE`
+- `infer_node_id_from_path()`
+- `header_json()`
+- `append_jsonl_sample_row()`
 
 Metrics JSONL files use a single-header format:
 

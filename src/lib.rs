@@ -2,6 +2,8 @@ pub mod config;
 pub mod context;
 pub mod error;
 #[cfg(feature = "metrics")]
+pub mod jsonl;
+#[cfg(feature = "metrics")]
 pub mod metrics;
 pub mod packet;
 mod platform;
