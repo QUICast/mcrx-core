@@ -52,6 +52,12 @@ Responsibilities:
 For integrations that need more delivery context, `PacketWithMetadata` wraps a
 `Packet` together with optional receive metadata from the platform layer.
 
+### Raw Receive
+
+With the optional `raw-packets` feature enabled, the crate exposes a parallel
+raw receive path for complete multicast IP datagrams. See
+[Raw Packet Receive](raw-packets.md).
+
 ## Data Flow
 
 ```mermaid
@@ -76,4 +82,5 @@ sockets.
 - `subscription` → one multicast receive path
 - `context` → orchestration across subscriptions
 - `platform` → socket lifecycle, interface resolution, family-specific join/leave, and receive boundary
+- `raw` → optional raw multicast IP datagram receive API
 - `tokio_adapter` → optional async wrapper over an extracted subscription

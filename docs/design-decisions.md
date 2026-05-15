@@ -8,6 +8,10 @@ explicit core API.
 Features like Tokio integration, richer receive metadata, and metrics are kept
 as optional layers around that core rather than redefining it.
 
+Raw multicast IP datagram receive follows the same pattern. It is available as
+an opt-in `raw-packets` feature so the default UDP receiver remains small and
+predictable.
+
 ## Context vs Subscription
 
 A single `Subscription` models one multicast receive path.
@@ -72,6 +76,21 @@ For event-loop integration, the library supports two ownership modes:
 This keeps ownership transfer explicit instead of forcing callers to rebuild
 subscription state around a raw socket handle.
 
+## Separate Raw API
+
+Raw multicast receive needs a different packet model:
+
+- there is no UDP destination port in the subscription config
+- the receive path returns full IP datagrams instead of UDP payloads
+- some platforms require different socket families or elevated privileges
+
+Because of that, the crate exposes `RawSubscriptionConfig`, `RawContext`,
+`RawSubscription`, and `RawPacket` as a separate feature-gated surface instead
+of overloading the existing UDP types with optional raw behavior.
+
+That separation keeps the default API stable and avoids changing semantics for
+existing users. Platform details live in [Raw Packet Receive](raw-packets.md).
+
 ## Explicit IPv6 Source and Interface Selection
 
 IPv6 multicast behavior is strongly shaped by scope and interface selection, so
@@ -81,7 +100,8 @@ the library keeps those choices explicit in the public model:
 - `SubscriptionConfig::interface` identifies the local join interface
 
 Those are deliberately separate because cross-machine IPv6 SSM usually needs
-both values, and they are often different.
+both values, and they are often different. Practical scoping guidance lives in
+[IPv6 Multicast](ipv6.md).
 
 ## Optional Receive Metadata
 

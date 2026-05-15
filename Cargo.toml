@@ -1,6 +1,6 @@
 [package]
 name = "mcrx-core"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2024"
 license = "BSD-2-Clause"
 description = "Runtime-agnostic and portable multicast receiver library for IPv4 and IPv6 ASM/SSM."
@@ -17,6 +17,7 @@ members = ["mcrx-core-py"]
 [features]
 default = []
 metrics = ["dep:serde_json"]
+raw-packets = []
 tokio = ["dep:tokio"]
 
 [dependencies]
@@ -34,3 +35,8 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Network
 name = "mcrx_tokio_recv"
 path = "src/bin/mcrx_tokio_recv.rs"
 required-features = ["tokio"]
+
+[[bin]]
+name = "mcrx_raw_recv"
+path = "src/bin/mcrx_raw_recv.rs"
+required-features = ["raw-packets"]

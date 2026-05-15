@@ -63,43 +63,12 @@ impl SubscriptionConfig {
             return Err(McrxError::InvalidDestinationPort);
         }
 
-        if !self.group.is_multicast() {
-            return Err(McrxError::InvalidMulticastGroup);
-        }
-
-        if let SourceFilter::Source(source) = self.source {
-            if source.is_multicast() {
-                return Err(McrxError::InvalidSourceAddress);
-            }
-
-            if !same_family(self.group, source) {
-                return Err(McrxError::SourceAddressFamilyMismatch);
-            }
-
-            if let (IpAddr::V6(group), IpAddr::V6(_)) = (self.group, source)
-                && !is_ipv6_ssm_group(group)
-            {
-                return Err(McrxError::InvalidIpv6SsmGroup);
-            }
-        }
-
-        if let Some(interface) = self.interface
-            && !same_family(self.group, interface)
-        {
-            return Err(McrxError::InterfaceAddressFamilyMismatch);
-        }
-
-        if let Some(interface_index) = self.interface_index {
-            if interface_index == 0 {
-                return Err(McrxError::InvalidInterfaceIndex);
-            }
-
-            if !self.is_ipv6() {
-                return Err(McrxError::InterfaceIndexRequiresIpv6);
-            }
-        }
-
-        Ok(())
+        validate_multicast_selection(
+            self.group,
+            &self.source,
+            self.interface,
+            self.interface_index,
+        )
     }
 
     /// Returns the configured address family.
@@ -222,14 +191,59 @@ impl SubscriptionConfig {
     }
 }
 
-fn same_family(left: IpAddr, right: IpAddr) -> bool {
+pub(crate) fn validate_multicast_selection(
+    group: IpAddr,
+    source: &SourceFilter,
+    interface: Option<IpAddr>,
+    interface_index: Option<u32>,
+) -> Result<(), McrxError> {
+    if !group.is_multicast() {
+        return Err(McrxError::InvalidMulticastGroup);
+    }
+
+    if let SourceFilter::Source(source) = source {
+        if source.is_multicast() {
+            return Err(McrxError::InvalidSourceAddress);
+        }
+
+        if !same_family(group, *source) {
+            return Err(McrxError::SourceAddressFamilyMismatch);
+        }
+
+        if let (IpAddr::V6(group), IpAddr::V6(_)) = (group, *source)
+            && !is_ipv6_ssm_group(group)
+        {
+            return Err(McrxError::InvalidIpv6SsmGroup);
+        }
+    }
+
+    if let Some(interface) = interface
+        && !same_family(group, interface)
+    {
+        return Err(McrxError::InterfaceAddressFamilyMismatch);
+    }
+
+    if let Some(interface_index) = interface_index {
+        if interface_index == 0 {
+            return Err(McrxError::InvalidInterfaceIndex);
+        }
+
+        if !matches!(group, IpAddr::V6(_)) {
+            return Err(McrxError::InterfaceIndexRequiresIpv6);
+        }
+    }
+
+    Ok(())
+}
+
+pub(crate) fn same_family(left: IpAddr, right: IpAddr) -> bool {
     matches!(
         (left, right),
         (IpAddr::V4(_), IpAddr::V4(_)) | (IpAddr::V6(_), IpAddr::V6(_))
     )
 }
 
-fn is_ipv6_ssm_group(group: Ipv6Addr) -> bool {
+pub(crate) fn is_ipv6_ssm_group(group: Ipv6Addr) -> bool {
     let octets = group.octets();
     octets[0] == 0xff && (octets[1] >> 4) == 0x3
 }

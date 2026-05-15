@@ -64,6 +64,18 @@ pub enum McrxError {
     #[error("MCRX: failed to bind UDP socket: {0}")]
     SocketBindFailed(io::Error),
 
+    /// Creating the raw receive socket failed.
+    #[error("MCRX: failed to create raw receive socket: {0}")]
+    RawSocketCreateFailed(io::Error),
+
+    /// Binding the raw receive socket failed.
+    #[error("MCRX: failed to bind raw receive socket: {0}")]
+    RawSocketBindFailed(io::Error),
+
+    /// Raw multicast receive is not supported on this platform in this build.
+    #[error("MCRX: raw multicast receive is not supported on this platform: {0}")]
+    RawPacketReceiveUnsupported(String),
+
     /// The requested IPv6 functionality is not implemented yet.
     #[error("MCRX: requested IPv6 functionality is not implemented yet")]
     Ipv6NotYetImplemented,

@@ -2,6 +2,7 @@ use std::ffi::CString;
 use std::net::IpAddr;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub(crate) struct ReceiveCliArgs {
     pub(crate) group: IpAddr,
     pub(crate) dst_port: u16,
@@ -10,9 +11,19 @@ pub(crate) struct ReceiveCliArgs {
     pub(crate) interface_index: Option<u32>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) struct RawReceiveCliArgs {
+    pub(crate) group: IpAddr,
+    pub(crate) source: Option<IpAddr>,
+    pub(crate) interface: Option<IpAddr>,
+    pub(crate) interface_index: Option<u32>,
+}
+
 type ParsedInterface = (Option<IpAddr>, Option<u32>);
 type ParsedSourceAndInterface = (Option<IpAddr>, Option<IpAddr>, Option<u32>);
 
+#[allow(dead_code)]
 pub(crate) fn parse_receive_cli_args(args: &[String]) -> Result<ReceiveCliArgs, String> {
     if args.len() < 3 {
         return Err("invalid arguments".to_string());
@@ -31,6 +42,29 @@ pub(crate) fn parse_receive_cli_args(args: &[String]) -> Result<ReceiveCliArgs, 
     Ok(ReceiveCliArgs {
         group,
         dst_port,
+        source,
+        interface,
+        interface_index,
+    })
+}
+
+#[allow(dead_code)]
+pub(crate) fn parse_raw_receive_cli_args(args: &[String]) -> Result<RawReceiveCliArgs, String> {
+    if args.len() < 2 {
+        return Err("invalid arguments".to_string());
+    }
+
+    let group = parse_ip("group", &args[1])?;
+    let remainder = &args[2..];
+
+    let (source, interface, interface_index) = parse_mixed_args(group, remainder)?;
+
+    if !group.is_multicast() {
+        return Err(format!("group address {group} is not multicast"));
+    }
+
+    Ok(RawReceiveCliArgs {
+        group,
         source,
         interface,
         interface_index,
@@ -185,6 +219,7 @@ fn interface_name_to_index(name: &str) -> Result<u32, String> {
     }
 }
 
+#[allow(dead_code)]
 fn parse_port(value: &str) -> Result<u16, String> {
     let port = value
         .parse::<u16>()
@@ -365,5 +400,29 @@ mod tests {
 
         assert_eq!(parsed.interface, None);
         assert_eq!(parsed.interface_index, Some(9));
+    }
+
+    #[test]
+    fn parses_raw_receive_args_without_port() {
+        let args = argv(&[
+            "mcrx-raw-recv",
+            "ff3e::8000:1234",
+            "2001:db8::10",
+            "--interface",
+            "7",
+        ]);
+
+        let parsed = parse_raw_receive_cli_args(&args).unwrap();
+
+        assert_eq!(
+            parsed.group,
+            IpAddr::V6("ff3e::8000:1234".parse::<Ipv6Addr>().unwrap())
+        );
+        assert_eq!(
+            parsed.source,
+            Some(IpAddr::V6("2001:db8::10".parse::<Ipv6Addr>().unwrap()))
+        );
+        assert_eq!(parsed.interface, None);
+        assert_eq!(parsed.interface_index, Some(7));
     }
 }

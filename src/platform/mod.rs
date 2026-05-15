@@ -29,6 +29,14 @@ use windows_sys::Win32::Networking::WinSock::{
 #[cfg(windows)]
 use windows_sys::Win32::System::IO::OVERLAPPED;
 
+#[cfg(feature = "raw-packets")]
+mod raw;
+#[cfg(feature = "raw-packets")]
+pub(crate) use raw::{
+    RawReceiveSocket, join_raw_multicast_group, leave_raw_multicast_group, open_raw_socket,
+    recv_raw_packet,
+};
+
 fn ipv4_membership(config: &SubscriptionConfig) -> Result<Ipv4Membership, McrxError> {
     config
         .ipv4_membership()

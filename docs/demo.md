@@ -2,11 +2,12 @@
 
 ## Overview
 
-The repository provides three receiver-focused demo binaries:
+The repository provides receiver-focused demo binaries:
 
 - `mcrx_recv`
 - `mcrx_tokio_recv` (with `--features tokio`)
 - `mcrx_recv_meta`
+- `mcrx_raw_recv` (with `--features raw-packets`)
 
 These are intended for real-network testing and API validation.
 
@@ -68,21 +69,33 @@ cargo run --bin mcrx_recv_meta -- ff3e::8000:1234 5000 <sender-ipv6> --interface
 
 ## IPv6 SSM Tips
 
-- Use `ff3x::/32` groups for IPv6 SSM. Good examples are `ff31::8000:1234`
-  for same-host tests and `ff3e::8000:1234` for cross-machine testing.
-- In receiver commands, `source` means the sender's IP address. `--interface`
-  means the receiver's local join interface.
-- The mixed form `mcrx_recv_meta <group> <port> <source> --interface <iface>`
-  is supported and is often the clearest way to spell IPv6 SSM.
-- `ff32::/16` is link-local scope. If you use it, send from a link-local
-  `fe80::...` source on the transmitting host rather than a ULA or global
-  source.
+Use [IPv6 Multicast](ipv6.md) for the full group scope and interface-selection
+rules. The important receiver-side split is:
+
+- `source` means the sender's IP address.
+- `--interface` means the receiver's local join interface.
 
 Cross-machine IPv6 SSM example:
 
 ```bash
 cargo run --bin mcrx_recv_meta -- ff3e::8000:1234 5000 <sender-ipv6> --interface <receiver-ipv6>
 ```
+
+## Raw Packet Receiver
+
+```bash
+cargo run --features raw-packets --bin mcrx_raw_recv -- <group> [source] [interface]
+```
+
+Examples:
+
+```bash
+cargo run --features raw-packets --bin mcrx_raw_recv -- 239.1.2.3 --interface 192.168.1.20
+cargo run --features raw-packets --bin mcrx_raw_recv -- ff3e::8000:1234 --interface 7
+```
+
+Raw receive has platform-specific privilege and support boundaries. See
+[Raw Packet Receive](raw-packets.md).
 
 ## Receiver Metrics
 

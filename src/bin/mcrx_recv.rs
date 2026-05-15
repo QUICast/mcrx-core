@@ -3,7 +3,7 @@ mod recv_args;
 
 #[cfg(feature = "metrics")]
 use mcrx_core::jsonl::{
-    HARDWARE_ARTIFACT_TYPE, HEIMDALL_JSONL_SCHEMA, MetricsJsonlOutputConfig, NETWORK_ARTIFACT_TYPE,
+    HARDWARE_ARTIFACT_TYPE, MetricsJsonlOutputConfig, NETWORK_ARTIFACT_TYPE,
     append_jsonl_sample_row, header_json, infer_node_id_from_path, unix_timestamp_secs,
 };
 use mcrx_core::{Context, SubscriptionConfig};
@@ -22,7 +22,7 @@ use std::process;
 use std::thread;
 use std::time::Duration;
 #[cfg(feature = "metrics")]
-use std::time::{Instant, UNIX_EPOCH};
+use std::time::Instant;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const MAX_PREVIEW_LEN: usize = 64;
@@ -588,8 +588,9 @@ fn print_usage(program: &str) {
 #[cfg(all(test, feature = "metrics"))]
 mod tests {
     use super::*;
+    use mcrx_core::jsonl::HEIMDALL_JSONL_SCHEMA;
     use std::fs;
-    use std::time::{Duration, SystemTime};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     #[test]
     fn metrics_jsonl_writes_one_header_then_compact_samples() {
