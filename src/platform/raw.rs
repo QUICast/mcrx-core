@@ -367,7 +367,7 @@ pub(crate) fn recv_raw_packet(
 
 #[cfg(target_os = "linux")]
 fn open_linux_packet_socket(config: &RawSubscriptionConfig) -> Result<Socket, McrxError> {
-    let protocol = packet_protocol(config.family());
+    let protocol = linux_packet_socket_protocol();
     let raw_fd = unsafe {
         libc::socket(
             libc::AF_PACKET,
@@ -413,11 +413,8 @@ fn open_linux_packet_socket(config: &RawSubscriptionConfig) -> Result<Socket, Mc
 }
 
 #[cfg(target_os = "linux")]
-fn packet_protocol(family: SubscriptionAddressFamily) -> u16 {
-    match family {
-        SubscriptionAddressFamily::Ipv4 => (libc::ETH_P_IP as u16).to_be(),
-        SubscriptionAddressFamily::Ipv6 => (libc::ETH_P_IPV6 as u16).to_be(),
-    }
+fn linux_packet_socket_protocol() -> u16 {
+    (libc::ETH_P_ALL as u16).to_be()
 }
 
 #[cfg(target_os = "macos")]
@@ -794,6 +791,14 @@ fn resolve_ipv4_interface_index(interface: Ipv4Addr) -> Result<u32, McrxError> {
 
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 fn packet_matches_config(parsed: ParsedIpDatagram, config: &RawSubscriptionConfig) -> bool {
+    if !matches!(
+        (config.family(), parsed.destination_ip),
+        (SubscriptionAddressFamily::Ipv4, IpAddr::V4(_))
+            | (SubscriptionAddressFamily::Ipv6, IpAddr::V6(_))
+    ) {
+        return false;
+    }
+
     if parsed.destination_ip != config.group {
         return false;
     }
@@ -1011,6 +1016,30 @@ mod tests {
     fn malformed_datagram_is_rejected() {
         assert!(parse_ip_datagram(&[0x45, 0x00, 0x00]).is_none());
         assert!(parse_ip_datagram(&[0x70; 8]).is_none());
+    }
+
+    #[test]
+    fn packet_filter_rejects_ipv6_for_ipv4_subscription() {
+        let parsed = ParsedIpDatagram {
+            source_ip: IpAddr::V6(Ipv6Addr::LOCALHOST),
+            destination_ip: IpAddr::V6("ff3e::8000:1234".parse().unwrap()),
+            protocol: 17,
+        };
+        let config = RawSubscriptionConfig::asm(Ipv4Addr::new(239, 1, 2, 3));
+
+        assert!(!packet_matches_config(parsed, &config));
+    }
+
+    #[test]
+    fn packet_filter_rejects_ipv4_for_ipv6_subscription() {
+        let parsed = ParsedIpDatagram {
+            source_ip: IpAddr::V4(Ipv4Addr::new(10, 1, 2, 3)),
+            destination_ip: IpAddr::V4(Ipv4Addr::new(239, 1, 2, 3)),
+            protocol: 17,
+        };
+        let config = RawSubscriptionConfig::asm_v6("ff3e::8000:1234".parse().unwrap());
+
+        assert!(!packet_matches_config(parsed, &config));
     }
 
     #[test]

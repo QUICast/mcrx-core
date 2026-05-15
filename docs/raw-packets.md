@@ -118,8 +118,21 @@ the complete IP datagram rather than just the UDP payload.
 Practical notes:
 
 - raw packet sockets usually require `CAP_NET_RAW` or root
+- the packet socket is opened with `ETH_P_ALL` and filters in userspace, matching
+  tcpdump-style behavior for same-host outbound multicast paths where the packet
+  may only be visible as `PACKET_OUTGOING`
 - multicast join and leave still reuse the normal multicast membership logic
 - interface selection matters, especially for IPv6 and link-local groups
+
+Manual same-host check:
+
+```bash
+sudo ./target/debug/mcrx_raw_recv 239.1.2.3 --interface <receiver-ipv4>
+tcpdump -Q out -ni <iface> 'dst host 239.1.2.3'
+```
+
+When a local sender emits to `239.1.2.3`, both tcpdump and `mcrx_raw_recv`
+should see the packet even if `tcpdump -Q in` stays quiet.
 
 ### macOS
 
