@@ -1564,7 +1564,7 @@ mod tests {
 
     #[test]
     fn open_and_join_socket_succeeds_for_valid_asm_config() {
-        let config = SubscriptionConfig::asm(Ipv4Addr::new(239, 1, 2, 3), 55000);
+        let config = SubscriptionConfig::asm(Ipv4Addr::new(239, 1, 2, 3), next_test_port());
 
         let socket = open_bound_socket(&config);
         assert!(socket.is_ok());
@@ -1579,7 +1579,7 @@ mod tests {
         let config = SubscriptionConfig::ssm(
             Ipv4Addr::new(232, 1, 2, 3),
             Ipv4Addr::new(192, 168, 188, 50),
-            55009,
+            next_test_port(),
         );
 
         let socket = open_bound_socket(&config);
@@ -1592,7 +1592,7 @@ mod tests {
 
     #[test]
     fn open_and_join_socket_succeeds_for_valid_ipv6_asm_config() {
-        let config = ipv6_asm_test_config(55008);
+        let config = ipv6_asm_test_config(next_test_port());
 
         let socket = open_bound_socket(&config);
         assert!(socket.is_ok());
@@ -1604,7 +1604,7 @@ mod tests {
 
     #[test]
     fn open_and_join_socket_succeeds_for_valid_ipv6_ssm_config() {
-        let Some(config) = sample_ssm_config_v6(55018) else {
+        let Some(config) = sample_ssm_config_v6(next_test_port()) else {
             return;
         };
 
@@ -1620,7 +1620,7 @@ mod tests {
         let config = SubscriptionConfig::ssm_v6(
             "ff3e::8000:1234".parse().unwrap(),
             "fd06:ba51:f296:0:70ce:8bfa:18e5:7759".parse().unwrap(),
-            55018,
+            next_test_port(),
         );
 
         let result = resolve_ipv6_interface(&config);
@@ -1633,7 +1633,8 @@ mod tests {
 
     #[test]
     fn prepare_existing_socket_rejects_wrong_port() {
-        let config = SubscriptionConfig::asm(Ipv4Addr::new(239, 1, 2, 3), 55010);
+        let config = SubscriptionConfig::asm(Ipv4Addr::new(239, 1, 2, 3), next_test_port());
+        let expected_port = config.dst_port;
 
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
         socket.set_reuse_address(true).unwrap();
@@ -1646,9 +1647,9 @@ mod tests {
         assert!(matches!(
             result,
             Err(McrxError::ExistingSocketPortMismatch {
-                expected: 55010,
+                expected,
                 ..
-            })
+            }) if expected == expected_port
         ));
     }
 

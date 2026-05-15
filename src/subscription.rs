@@ -391,8 +391,9 @@ mod tests {
     use crate::platform;
     use crate::test_support::{
         ipv6_group_socket_addr, make_multicast_sender, make_multicast_sender_v6,
-        make_multicast_sender_v6_for_source, sample_config, sample_config_v6,
-        sample_ssm_receive_config_v6,
+        make_multicast_sender_v6_for_source, sample_config_on_unused_port,
+        sample_config_v6_on_unused_port, sample_ssm_receive_config_v6_on_unused_port,
+        unused_udp_port_v4,
     };
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6, UdpSocket};
     use std::time::{Duration, Instant};
@@ -477,7 +478,7 @@ mod tests {
 
     #[test]
     fn try_recv_returns_none_when_no_packet_is_available() {
-        let config = sample_config(55020);
+        let config = sample_config_on_unused_port();
         let socket = platform::open_bound_socket(&config).unwrap();
         let mut subscription = Subscription::from_receive_socket(SubscriptionId(1), config, socket);
         platform::join_multicast_group(subscription.socket(), subscription.config()).unwrap();
@@ -490,7 +491,7 @@ mod tests {
 
     #[test]
     fn try_recv_receives_packet_sent_to_bound_port() {
-        let config = sample_config(55021);
+        let config = sample_config_on_unused_port();
         let socket = platform::open_bound_socket(&config).unwrap();
         let mut subscription =
             Subscription::from_receive_socket(SubscriptionId(1), config.clone(), socket);
@@ -519,7 +520,7 @@ mod tests {
 
     #[test]
     fn try_recv_with_metadata_exposes_current_socket_context() {
-        let config = sample_config(55029);
+        let config = sample_config_on_unused_port();
         let socket = platform::open_bound_socket(&config).unwrap();
         let mut subscription =
             Subscription::from_receive_socket(SubscriptionId(1), config.clone(), socket);
@@ -561,7 +562,7 @@ mod tests {
 
     #[test]
     fn try_recv_with_metadata_exposes_current_ipv6_socket_context() {
-        let config = sample_config_v6(55039);
+        let config = sample_config_v6_on_unused_port();
         let socket = platform::open_bound_socket(&config).unwrap();
         let mut subscription =
             Subscription::from_receive_socket(SubscriptionId(1), config.clone(), socket);
@@ -609,7 +610,7 @@ mod tests {
 
     #[test]
     fn try_recv_receives_multicast_packet_from_joined_group() {
-        let config = sample_config(55022);
+        let config = sample_config_on_unused_port();
         let socket = platform::open_bound_socket(&config).unwrap();
         let mut subscription =
             Subscription::from_receive_socket(SubscriptionId(1), config.clone(), socket);
@@ -638,7 +639,7 @@ mod tests {
     #[test]
     fn try_recv_receives_ssm_packet_from_allowed_source() {
         let interface = primary_ipv4();
-        let config = test_ssm_config(55023, interface);
+        let config = test_ssm_config(unused_udp_port_v4(), interface);
         let socket = platform::open_bound_socket(&config).unwrap();
         let mut subscription =
             Subscription::from_receive_socket(SubscriptionId(1), config.clone(), socket);
@@ -669,7 +670,7 @@ mod tests {
 
     #[test]
     fn try_recv_receives_ipv6_ssm_packet_from_allowed_source() {
-        let Some(config) = sample_ssm_receive_config_v6(55040) else {
+        let Some(config) = sample_ssm_receive_config_v6_on_unused_port() else {
             return;
         };
         let interface = match config.source_addr().unwrap() {
@@ -703,7 +704,7 @@ mod tests {
 
     #[test]
     fn mark_joined_transitions_bound_to_joined_state() {
-        let config = sample_config(55024);
+        let config = sample_config_on_unused_port();
         let socket = platform::open_bound_socket(&config).unwrap();
         let mut subscription = Subscription::from_receive_socket(SubscriptionId(1), config, socket);
 
@@ -714,7 +715,7 @@ mod tests {
 
     #[test]
     fn mark_joined_rejects_already_joined_subscription() {
-        let config = sample_config(55025);
+        let config = sample_config_on_unused_port();
         let socket = platform::open_bound_socket(&config).unwrap();
         let mut subscription = Subscription::from_receive_socket(SubscriptionId(1), config, socket);
 
@@ -726,7 +727,7 @@ mod tests {
 
     #[test]
     fn mark_bound_transitions_joined_to_bound_state() {
-        let config = sample_config(55026);
+        let config = sample_config_on_unused_port();
         let socket = platform::open_bound_socket(&config).unwrap();
         let mut subscription = Subscription::from_receive_socket(SubscriptionId(1), config, socket);
 
@@ -738,7 +739,7 @@ mod tests {
 
     #[test]
     fn mark_bound_rejects_already_bound_subscription() {
-        let config = sample_config(55027);
+        let config = sample_config_on_unused_port();
         let socket = platform::open_bound_socket(&config).unwrap();
         let mut subscription = Subscription::from_receive_socket(SubscriptionId(1), config, socket);
 
@@ -749,7 +750,7 @@ mod tests {
 
     #[test]
     fn local_addr_returns_bound_socket_address() {
-        let config = sample_config(55028);
+        let config = sample_config_on_unused_port();
         let socket = platform::open_bound_socket(&config).unwrap();
         let subscription =
             Subscription::from_receive_socket(SubscriptionId(1), config.clone(), socket);

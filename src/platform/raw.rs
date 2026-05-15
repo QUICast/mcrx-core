@@ -62,6 +62,17 @@ struct ParsedIpDatagram {
     protocol: u8,
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+const MAX_RAW_FILTERED_READS_PER_RECV: usize = 256;
+
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+fn raw_filter_budget_exhausted(filtered_reads: &mut usize) -> bool {
+    // Raw capture sockets can see unrelated interface traffic. Keep one
+    // non-blocking receive call bounded even when the interface is noisy.
+    *filtered_reads += 1;
+    *filtered_reads >= MAX_RAW_FILTERED_READS_PER_RECV
+}
+
 #[cfg(target_os = "linux")]
 pub(crate) fn open_raw_socket(
     config: &RawSubscriptionConfig,
@@ -189,6 +200,7 @@ pub(crate) fn recv_raw_packet(
     config: &RawSubscriptionConfig,
 ) -> Result<Option<RawPacket>, McrxError> {
     let mut buf = [std::mem::MaybeUninit::<u8>::uninit(); 65535];
+    let mut filtered_reads = 0usize;
 
     loop {
         let mut addr: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
@@ -218,10 +230,16 @@ pub(crate) fn recv_raw_packet(
         let datagram = unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, len) };
 
         let Some(parsed) = parse_ip_datagram(datagram) else {
+            if raw_filter_budget_exhausted(&mut filtered_reads) {
+                return Ok(None);
+            }
             continue;
         };
 
         if !packet_matches_config(parsed, config) {
+            if raw_filter_budget_exhausted(&mut filtered_reads) {
+                return Ok(None);
+            }
             continue;
         }
 
@@ -249,6 +267,7 @@ pub(crate) fn recv_raw_packet(
     config: &RawSubscriptionConfig,
 ) -> Result<Option<RawPacket>, McrxError> {
     let mut buf = vec![0u8; socket.apple_bpf_buffer_len];
+    let mut filtered_reads = 0usize;
 
     loop {
         let len = unsafe {
@@ -276,6 +295,9 @@ pub(crate) fn recv_raw_packet(
             config,
         )?
         else {
+            if raw_filter_budget_exhausted(&mut filtered_reads) {
+                return Ok(None);
+            }
             continue;
         };
 
@@ -309,6 +331,7 @@ fn recv_raw_packet_from_windows_socket(
     config: &RawSubscriptionConfig,
 ) -> Result<Option<RawPacket>, McrxError> {
     let mut buf = [std::mem::MaybeUninit::<u8>::uninit(); 65535];
+    let mut filtered_reads = 0usize;
 
     loop {
         let len = unsafe {
@@ -333,10 +356,16 @@ fn recv_raw_packet_from_windows_socket(
         let datagram = unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, len) };
 
         let Some(parsed) = parse_ip_datagram(datagram) else {
+            if raw_filter_budget_exhausted(&mut filtered_reads) {
+                return Ok(None);
+            }
             continue;
         };
 
         if !packet_matches_config(parsed, config) {
+            if raw_filter_budget_exhausted(&mut filtered_reads) {
+                return Ok(None);
+            }
             continue;
         }
 

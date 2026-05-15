@@ -18,6 +18,37 @@ pub(crate) fn sample_config(port: u16) -> SubscriptionConfig {
     }
 }
 
+/// Returns an unused IPv4 UDP port for tests that need to bind a receive socket.
+pub(crate) fn unused_udp_port_v4() -> u16 {
+    UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// Returns an unused IPv6 UDP port for tests that need to bind a receive socket.
+pub(crate) fn unused_udp_port_v6() -> u16 {
+    UdpSocket::bind(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 0, 0, 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// Creates a standard ASM test subscription configuration on an unused IPv4
+/// UDP port. The port is only reserved long enough to discover it, so callers
+/// should bind the actual receive socket immediately.
+pub(crate) fn sample_config_on_unused_port() -> SubscriptionConfig {
+    sample_config(unused_udp_port_v4())
+}
+
+/// Creates a standard IPv6 ASM test subscription configuration on an unused
+/// IPv6 UDP port.
+pub(crate) fn sample_config_v6_on_unused_port() -> SubscriptionConfig {
+    sample_config_v6(unused_udp_port_v6())
+}
+
 /// Creates a standard IPv6 ASM test subscription configuration on the given port.
 pub(crate) fn sample_config_v6(port: u16) -> SubscriptionConfig {
     let mut config = SubscriptionConfig::asm_v6("ff01::1234".parse().unwrap(), port);
@@ -58,6 +89,11 @@ pub(crate) fn sample_ssm_receive_config_v6(port: u16) -> Option<SubscriptionConf
     {
         sample_ssm_config_v6(port)
     }
+}
+
+/// Creates an IPv6 SSM receive test configuration on an unused IPv6 UDP port.
+pub(crate) fn sample_ssm_receive_config_v6_on_unused_port() -> Option<SubscriptionConfig> {
+    sample_ssm_receive_config_v6(unused_udp_port_v6())
 }
 
 /// Receives the next packet from the context before the given deadline.

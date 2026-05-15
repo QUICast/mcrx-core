@@ -148,13 +148,10 @@ impl TokioSubscription {
 #[cfg(all(test, feature = "tokio"))]
 mod tests {
     use super::*;
+    use crate::test_support::sample_config_on_unused_port;
     use crate::{Context, SubscriptionConfig};
     use std::net::{Ipv4Addr, SocketAddrV4};
     use tokio::time::{Duration, timeout};
-
-    fn sample_config(port: u16) -> SubscriptionConfig {
-        SubscriptionConfig::asm(Ipv4Addr::new(239, 1, 2, 3), port)
-    }
 
     fn ipv4_group(config: &SubscriptionConfig) -> Ipv4Addr {
         config.ipv4_membership().unwrap().group
@@ -167,7 +164,7 @@ mod tests {
     #[tokio::test]
     async fn tokio_subscription_receives_metadata_packet() {
         let mut context = Context::new();
-        let config = sample_config(55110);
+        let config = sample_config_on_unused_port();
         let id = context.add_subscription(config.clone()).unwrap();
         context.join_subscription(id).unwrap();
 
@@ -196,7 +193,7 @@ mod tests {
     #[tokio::test]
     async fn tokio_subscription_with_metrics_is_spawn_safe() {
         let mut context = Context::new();
-        let config = sample_config(55111);
+        let config = sample_config_on_unused_port();
         let id = context.add_subscription(config.clone()).unwrap();
         context.join_subscription(id).unwrap();
 

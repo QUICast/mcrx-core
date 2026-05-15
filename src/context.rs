@@ -522,7 +522,7 @@ mod tests {
 
     use crate::test_support::{
         ipv6_group_socket_addr, make_multicast_sender, make_multicast_sender_v6, recv_next_packet,
-        sample_config, sample_config_v6,
+        sample_config_on_unused_port, sample_config_v6_on_unused_port,
     };
 
     fn make_bound_external_socket(port: u16) -> Socket {
@@ -613,7 +613,9 @@ mod tests {
     fn add_subscription_returns_id_and_increases_count() {
         let mut context = Context::new();
 
-        let id = context.add_subscription(sample_config(10000)).unwrap();
+        let id = context
+            .add_subscription(sample_config_on_unused_port())
+            .unwrap();
 
         assert_eq!(id, SubscriptionId(1));
         assert_eq!(context.subscription_count(), 1);
@@ -624,8 +626,12 @@ mod tests {
     fn adding_two_subscriptions_generates_different_ids() {
         let mut context = Context::new();
 
-        let first = context.add_subscription(sample_config(5000)).unwrap();
-        let second = context.add_subscription(sample_config(5001)).unwrap();
+        let first = context
+            .add_subscription(sample_config_on_unused_port())
+            .unwrap();
+        let second = context
+            .add_subscription(sample_config_on_unused_port())
+            .unwrap();
 
         assert_ne!(first, second);
         assert_eq!(first, SubscriptionId(1));
@@ -653,7 +659,7 @@ mod tests {
     #[test]
     fn try_recv_any_returns_packet_from_ready_ipv6_subscription() {
         let mut context = Context::new();
-        let config = sample_config_v6(9032);
+        let config = sample_config_v6_on_unused_port();
         let id = context.add_subscription(config.clone()).unwrap();
         context.join_subscription(id).unwrap();
 
@@ -675,7 +681,7 @@ mod tests {
     #[test]
     fn try_recv_any_with_metadata_returns_packet_from_ready_ipv6_subscription() {
         let mut context = Context::new();
-        let config = sample_config_v6(9033);
+        let config = sample_config_v6_on_unused_port();
         let id = context.add_subscription(config.clone()).unwrap();
         context.join_subscription(id).unwrap();
 
@@ -722,7 +728,9 @@ mod tests {
     fn remove_existing_subscription_returns_true() {
         let mut context = Context::new();
 
-        let id = context.add_subscription(sample_config(5009)).unwrap();
+        let id = context
+            .add_subscription(sample_config_on_unused_port())
+            .unwrap();
 
         let removed = context.remove_subscription(id);
 
@@ -742,7 +750,7 @@ mod tests {
     #[test]
     fn take_subscription_returns_owned_subscription_and_removes_it() {
         let mut context = Context::new();
-        let config = sample_config(5010);
+        let config = sample_config_on_unused_port();
         let id = context.add_subscription(config.clone()).unwrap();
         context.join_subscription(id).unwrap();
 
@@ -758,7 +766,7 @@ mod tests {
     #[test]
     fn taken_subscription_can_be_split_into_owned_parts() {
         let mut context = Context::new();
-        let config = sample_config(5011);
+        let config = sample_config_on_unused_port();
         let id = context.add_subscription(config.clone()).unwrap();
         context.join_subscription(id).unwrap();
 
@@ -776,7 +784,7 @@ mod tests {
     #[test]
     fn taken_joined_subscription_can_still_receive_packets() {
         let mut context = Context::new();
-        let config = sample_config(5012);
+        let config = sample_config_on_unused_port();
         let id = context.add_subscription(config.clone()).unwrap();
         context.join_subscription(id).unwrap();
 
@@ -807,9 +815,15 @@ mod tests {
     fn three_subscriptions_have_len_3() {
         let mut context = Context::new();
 
-        context.add_subscription(sample_config(6000)).unwrap();
-        context.add_subscription(sample_config(6001)).unwrap();
-        context.add_subscription(sample_config(6002)).unwrap();
+        context
+            .add_subscription(sample_config_on_unused_port())
+            .unwrap();
+        context
+            .add_subscription(sample_config_on_unused_port())
+            .unwrap();
+        context
+            .add_subscription(sample_config_on_unused_port())
+            .unwrap();
 
         assert_eq!(context.subscription_count(), 3);
     }
@@ -817,7 +831,7 @@ mod tests {
     #[test]
     fn duplicate_subscription_is_rejected() {
         let mut context = Context::new();
-        let config = sample_config(7000);
+        let config = sample_config_on_unused_port();
 
         let first = context.add_subscription(config.clone());
         let second = context.add_subscription(config);
@@ -830,7 +844,7 @@ mod tests {
     #[test]
     fn add_subscription_with_socket_returns_id_and_increases_count() {
         let mut context = Context::new();
-        let config = sample_config(7001);
+        let config = sample_config_on_unused_port();
         let socket = make_bound_external_socket(config.dst_port);
 
         let id = context
@@ -845,21 +859,25 @@ mod tests {
     #[test]
     fn add_subscription_with_socket_rejects_port_mismatch() {
         let mut context = Context::new();
-        let config = sample_config(7002);
+        let config = sample_config_on_unused_port();
+        let expected_port = config.dst_port;
         let socket = make_bound_external_socket(0);
 
         let result = context.add_subscription_with_socket(config, socket);
 
         assert!(matches!(
             result,
-            Err(McrxError::ExistingSocketPortMismatch { expected: 7002, .. })
+            Err(McrxError::ExistingSocketPortMismatch { expected, .. })
+                if expected == expected_port
         ));
     }
 
     #[test]
     fn contains_subscription_returns_true_for_existing_id() {
         let mut context = Context::new();
-        let id = context.add_subscription(sample_config(8000)).unwrap();
+        let id = context
+            .add_subscription(sample_config_on_unused_port())
+            .unwrap();
 
         assert!(context.contains_subscription(id));
     }
@@ -874,7 +892,9 @@ mod tests {
     #[test]
     fn get_subscription_returns_matching_subscription() {
         let mut context = Context::new();
-        let id = context.add_subscription(sample_config(9000)).unwrap();
+        let id = context
+            .add_subscription(sample_config_on_unused_port())
+            .unwrap();
 
         let subscription = context.get_subscription(id);
 
@@ -894,7 +914,9 @@ mod tests {
     #[test]
     fn get_subscription_mut_returns_matching_subscription() {
         let mut context = Context::new();
-        let id = context.add_subscription(sample_config(9001)).unwrap();
+        let id = context
+            .add_subscription(sample_config_on_unused_port())
+            .unwrap();
 
         let subscription = context.get_subscription_mut(id);
 
@@ -914,7 +936,9 @@ mod tests {
     #[test]
     fn try_recv_any_returns_none_when_no_packet_is_available() {
         let mut context = Context::new();
-        let id = context.add_subscription(sample_config(9002)).unwrap();
+        let id = context
+            .add_subscription(sample_config_on_unused_port())
+            .unwrap();
         context.join_subscription(id).unwrap();
 
         let result = context.try_recv_any().unwrap();
@@ -925,7 +949,7 @@ mod tests {
     #[test]
     fn try_recv_any_returns_packet_from_ready_subscription() {
         let mut context = Context::new();
-        let config = sample_config(9003);
+        let config = sample_config_on_unused_port();
         let id = context.add_subscription(config.clone()).unwrap();
         context.join_subscription(id).unwrap();
 
@@ -947,7 +971,7 @@ mod tests {
     #[test]
     fn try_recv_any_with_metadata_returns_packet_from_ready_subscription() {
         let mut context = Context::new();
-        let config = sample_config(9030);
+        let config = sample_config_on_unused_port();
         let id = context.add_subscription(config.clone()).unwrap();
         context.join_subscription(id).unwrap();
 
@@ -989,7 +1013,7 @@ mod tests {
     #[test]
     fn try_recv_any_works_with_caller_provided_socket() {
         let mut context = Context::new();
-        let config = sample_config(9031);
+        let config = sample_config_on_unused_port();
         let socket = make_bound_external_socket(config.dst_port);
         let id = context
             .add_subscription_with_socket(config.clone(), socket)
@@ -1015,8 +1039,8 @@ mod tests {
     #[test]
     fn try_recv_any_round_robins_between_ready_subscriptions() {
         let mut context = Context::new();
-        let first_config = sample_config(9004);
-        let second_config = sample_config(9005);
+        let first_config = sample_config_on_unused_port();
+        let second_config = sample_config_on_unused_port();
 
         let first_id = context.add_subscription(first_config.clone()).unwrap();
         context.join_subscription(first_id).unwrap();
@@ -1050,7 +1074,9 @@ mod tests {
     #[test]
     fn try_recv_batch_into_returns_zero_when_no_packet_is_available() {
         let mut context = Context::new();
-        let id = context.add_subscription(sample_config(9006)).unwrap();
+        let id = context
+            .add_subscription(sample_config_on_unused_port())
+            .unwrap();
         context.join_subscription(id).unwrap();
 
         let mut packets = Vec::new();
@@ -1063,8 +1089,8 @@ mod tests {
     #[test]
     fn try_recv_batch_into_receives_up_to_max_packets() {
         let mut context = Context::new();
-        let first_config = sample_config(9007);
-        let second_config = sample_config(9008);
+        let first_config = sample_config_on_unused_port();
+        let second_config = sample_config_on_unused_port();
 
         let first_id = context.add_subscription(first_config.clone()).unwrap();
         context.join_subscription(first_id).unwrap();
@@ -1103,8 +1129,8 @@ mod tests {
     #[test]
     fn try_recv_batch_with_metadata_into_receives_up_to_max_packets() {
         let mut context = Context::new();
-        let first_config = sample_config(9070);
-        let second_config = sample_config(9080);
+        let first_config = sample_config_on_unused_port();
+        let second_config = sample_config_on_unused_port();
 
         let first_id = context.add_subscription(first_config.clone()).unwrap();
         context.join_subscription(first_id).unwrap();
@@ -1166,8 +1192,8 @@ mod tests {
     #[test]
     fn try_recv_all_into_drains_all_available_packets() {
         let mut context = Context::new();
-        let first_config = sample_config(9009);
-        let second_config = sample_config(9010);
+        let first_config = sample_config_on_unused_port();
+        let second_config = sample_config_on_unused_port();
 
         let first_id = context.add_subscription(first_config.clone()).unwrap();
         context.join_subscription(first_id).unwrap();
@@ -1208,8 +1234,8 @@ mod tests {
     #[test]
     fn try_recv_all_with_metadata_into_drains_all_available_packets() {
         let mut context = Context::new();
-        let first_config = sample_config(9090);
-        let second_config = sample_config(9100);
+        let first_config = sample_config_on_unused_port();
+        let second_config = sample_config_on_unused_port();
 
         let first_id = context.add_subscription(first_config.clone()).unwrap();
         context.join_subscription(first_id).unwrap();
@@ -1261,7 +1287,9 @@ mod tests {
     #[test]
     fn add_subscription_creates_bound_subscription() {
         let mut context = Context::new();
-        let id = context.add_subscription(sample_config(9011)).unwrap();
+        let id = context
+            .add_subscription(sample_config_on_unused_port())
+            .unwrap();
 
         let subscription = context.get_subscription(id).unwrap();
         assert_eq!(subscription.state(), SubscriptionState::Bound);
@@ -1270,7 +1298,9 @@ mod tests {
     #[test]
     fn join_subscription_transitions_bound_to_joined() {
         let mut context = Context::new();
-        let id = context.add_subscription(sample_config(9012)).unwrap();
+        let id = context
+            .add_subscription(sample_config_on_unused_port())
+            .unwrap();
 
         context.join_subscription(id).unwrap();
 
@@ -1281,7 +1311,9 @@ mod tests {
     #[test]
     fn leave_subscription_transitions_joined_to_bound() {
         let mut context = Context::new();
-        let id = context.add_subscription(sample_config(9013)).unwrap();
+        let id = context
+            .add_subscription(sample_config_on_unused_port())
+            .unwrap();
 
         context.join_subscription(id).unwrap();
         context.leave_subscription(id).unwrap();
@@ -1293,7 +1325,9 @@ mod tests {
     #[test]
     fn join_subscription_rejects_already_joined_subscription() {
         let mut context = Context::new();
-        let id = context.add_subscription(sample_config(9014)).unwrap();
+        let id = context
+            .add_subscription(sample_config_on_unused_port())
+            .unwrap();
 
         context.join_subscription(id).unwrap();
         let result = context.join_subscription(id);
@@ -1304,7 +1338,9 @@ mod tests {
     #[test]
     fn leave_subscription_rejects_not_joined_subscription() {
         let mut context = Context::new();
-        let id = context.add_subscription(sample_config(9015)).unwrap();
+        let id = context
+            .add_subscription(sample_config_on_unused_port())
+            .unwrap();
 
         let result = context.leave_subscription(id);
 

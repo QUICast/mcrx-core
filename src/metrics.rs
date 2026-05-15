@@ -370,12 +370,18 @@ struct ProcSnapshot {
 
 #[cfg(all(feature = "metrics", target_os = "linux"))]
 fn linux_page_size() -> u64 {
-    4096
+    linux_sysconf(libc::_SC_PAGESIZE, 4096)
 }
 
 #[cfg(all(feature = "metrics", target_os = "linux"))]
 fn linux_clk_tck() -> u64 {
-    100
+    linux_sysconf(libc::_SC_CLK_TCK, 100)
+}
+
+#[cfg(all(feature = "metrics", target_os = "linux"))]
+fn linux_sysconf(name: libc::c_int, fallback: u64) -> u64 {
+    let value = unsafe { libc::sysconf(name) };
+    if value > 0 { value as u64 } else { fallback }
 }
 
 #[cfg(all(feature = "metrics", target_os = "linux"))]
@@ -763,7 +769,9 @@ mod tests {
     use crate::Context;
     use crate::Subscription;
     use crate::SubscriptionConfig;
-    use crate::test_support::{make_multicast_sender, recv_next_packet, sample_config};
+    use crate::test_support::{
+        make_multicast_sender, recv_next_packet, sample_config_on_unused_port,
+    };
 
     use std::net::SocketAddrV4;
     use std::thread;
@@ -993,7 +1001,9 @@ mod tests {
     #[test]
     fn metrics_snapshot_tracks_join_and_leave_counts() {
         let mut context = Context::new();
-        let id = context.add_subscription(sample_config(9016)).unwrap();
+        let id = context
+            .add_subscription(sample_config_on_unused_port())
+            .unwrap();
 
         context.join_subscription(id).unwrap();
         context.leave_subscription(id).unwrap();
@@ -1015,7 +1025,7 @@ mod tests {
     #[test]
     fn metrics_snapshot_tracks_received_packets_and_bytes() {
         let mut context = Context::new();
-        let config = sample_config(9017);
+        let config = sample_config_on_unused_port();
         let id = context.add_subscription(config.clone()).unwrap();
         context.join_subscription(id).unwrap();
 
@@ -1048,7 +1058,7 @@ mod tests {
     #[test]
     fn context_metrics_totals_survive_subscription_removal() {
         let mut context = Context::new();
-        let config = sample_config(9019);
+        let config = sample_config_on_unused_port();
         let id = context.add_subscription(config.clone()).unwrap();
         context.join_subscription(id).unwrap();
 
@@ -1083,7 +1093,7 @@ mod tests {
     #[test]
     fn metrics_snapshot_delta_tracks_counter_changes() {
         let mut context = Context::new();
-        let config = sample_config(9018);
+        let config = sample_config_on_unused_port();
         let id = context.add_subscription(config.clone()).unwrap();
         context.join_subscription(id).unwrap();
 
@@ -1115,7 +1125,7 @@ mod tests {
     #[test]
     fn try_recv_all_counts_one_batch_call_per_public_invocation() {
         let mut context = Context::new();
-        let config = sample_config(9020);
+        let config = sample_config_on_unused_port();
         let id = context.add_subscription(config.clone()).unwrap();
         context.join_subscription(id).unwrap();
 

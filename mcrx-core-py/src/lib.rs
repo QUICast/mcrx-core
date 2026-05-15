@@ -164,11 +164,16 @@ fn mcrx_error_to_py(err: McrxError) -> PyErr {
         | McrxError::SourceAddressFamilyMismatch
         | McrxError::InterfaceAddressFamilyMismatch
         | McrxError::InvalidInterfaceIndex
-        | McrxError::InterfaceIndexRequiresIpv6 => PyValueError::new_err(err.to_string()),
+        | McrxError::InterfaceIndexRequiresIpv6
+        | McrxError::Ipv6SourceSpecificMulticastRequiresInterface => {
+            PyValueError::new_err(err.to_string())
+        }
         McrxError::SubscriptionNotFound => PyLookupError::new_err(err.to_string()),
         McrxError::SocketCreateFailed(io_err)
         | McrxError::SocketOptionFailed(io_err)
         | McrxError::SocketBindFailed(io_err)
+        | McrxError::RawSocketCreateFailed(io_err)
+        | McrxError::RawSocketBindFailed(io_err)
         | McrxError::SocketLocalAddrFailed(io_err)
         | McrxError::SocketIoctlFailed(io_err)
         | McrxError::MulticastJoinFailed(io_err)
