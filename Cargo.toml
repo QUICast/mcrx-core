@@ -1,6 +1,6 @@
 [package]
 name = "mcrx-core"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2024"
 license = "BSD-2-Clause"
 description = "Runtime-agnostic and portable multicast receiver library for IPv4 and IPv6 ASM/SSM."
