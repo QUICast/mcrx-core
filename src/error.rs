@@ -108,6 +108,12 @@ pub enum McrxError {
     #[error("MCRX: source-specific multicast is not supported on this platform")]
     SourceSpecificMulticastUnsupported,
 
+    /// IPv6 source-specific multicast requires explicit interface selection.
+    #[error(
+        "MCRX: IPv6 source-specific multicast requires an explicit interface address or interface index"
+    )]
+    Ipv6SourceSpecificMulticastRequiresInterface,
+
     /// IPv6 source-specific multicast has not been wired into the receiver yet.
     #[error("MCRX: IPv6 source-specific multicast is not implemented yet")]
     Ipv6SourceSpecificMulticastNotYetImplemented,

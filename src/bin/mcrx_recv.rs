@@ -561,6 +561,9 @@ fn print_usage(program: &str) {
         "  - for IPv6, <interface> may also be a scoped address like fe80::1%7 or fe80::1%en0, or a numeric interface index"
     );
     eprintln!("  - for IPv6 SSM, use ff3x::/32 groups such as ff31::8000:1234 or ff3e::8000:1234");
+    eprintln!(
+        "  - for IPv6 SSM, pass --interface <receiver-ipv6-or-ifindex>; this is required on macOS"
+    );
     eprintln!("  - for link-local IPv6 SSM groups such as ff32::/16, send from a fe80:: source");
 
     #[cfg(feature = "metrics")]

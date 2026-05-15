@@ -23,6 +23,8 @@ For IPv6 SSM receivers, the two important addresses are different concepts:
 - `interface` is the receiver's local join interface.
 
 On one machine they may be the same. Across machines they usually differ.
+On macOS, IPv6 SSM joins require explicit interface selection; omitting
+`interface` leaves too little information for the kernel join request.
 
 ```rust
 let mut config = SubscriptionConfig::ssm_v6(group, source, port);
@@ -60,5 +62,7 @@ cargo run --bin mcrx_recv_meta -- ff3e::8000:1234 5000 <sender-ipv6> --interface
   IPv6 source that is valid on that network.
 - The configured SSM `source` must match the actual packet source chosen by the
   sender.
+- For IPv6 SSM, pass `--interface <receiver-ipv6>` or `--interface <ifindex>`;
+  this is required on macOS and recommended everywhere for deterministic joins.
 
 More runnable examples live in [Demo Binaries](demo.md).

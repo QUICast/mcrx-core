@@ -58,6 +58,14 @@ fn resolve_ipv4_interface(config: &SubscriptionConfig) -> Result<Ipv4Addr, McrxE
 fn resolve_ipv6_interface(config: &SubscriptionConfig) -> Result<u32, McrxError> {
     let membership = ipv6_membership(config)?;
 
+    #[cfg(target_vendor = "apple")]
+    if membership.source.is_some()
+        && membership.interface.is_none()
+        && membership.interface_index.is_none()
+    {
+        return Err(McrxError::Ipv6SourceSpecificMulticastRequiresInterface);
+    }
+
     match (membership.interface_index, membership.interface) {
         (Some(interface_index), _) => Ok(interface_index),
         (None, None) => Ok(0),
@@ -1604,6 +1612,23 @@ mod tests {
         let result = join_multicast_group(socket.socket(), &config);
 
         assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    #[cfg(target_vendor = "apple")]
+    fn ipv6_ssm_without_interface_returns_clear_error_on_apple() {
+        let config = SubscriptionConfig::ssm_v6(
+            "ff3e::8000:1234".parse().unwrap(),
+            "fd06:ba51:f296:0:70ce:8bfa:18e5:7759".parse().unwrap(),
+            55018,
+        );
+
+        let result = resolve_ipv6_interface(&config);
+
+        assert!(matches!(
+            result,
+            Err(McrxError::Ipv6SourceSpecificMulticastRequiresInterface)
+        ));
     }
 
     #[test]
