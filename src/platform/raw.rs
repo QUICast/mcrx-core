@@ -25,13 +25,15 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::windows::io::{AsRawSocket, RawSocket};
 #[cfg(windows)]
 use windows_sys::Win32::Networking::WinSock::{
-    IPPROTO_IP, RCVALL_ON, SIO_RCVALL, SIO_RCVALL_MCAST, SOCKET, SOCKET_ERROR, WSAGetLastError,
-    WSAIoctl,
+    IPPROTO_IP, IPPROTO_UDP, RCVALL_ON, SIO_RCVALL, SIO_RCVALL_MCAST, SOCKET, SOCKET_ERROR,
+    WSAGetLastError, WSAIoctl,
 };
 
 pub(crate) struct RawReceiveSocket {
     receive_socket: Socket,
     membership_socket: Option<Socket>,
+    #[cfg(windows)]
+    windows_udp_receive_socket: Option<Socket>,
     #[cfg(target_os = "macos")]
     apple_bpf_buffer_len: usize,
     #[cfg(target_os = "macos")]
@@ -123,11 +125,13 @@ pub(crate) fn open_raw_socket(
     };
 
     let raw_socket = open_windows_raw_socket(interface)?;
+    let udp_raw_socket = open_windows_udp_raw_socket(interface).ok();
     let membership_socket = open_membership_socket(config.family())?;
 
     Ok(RawReceiveSocket {
         receive_socket: raw_socket,
         membership_socket: Some(membership_socket),
+        windows_udp_receive_socket: udp_raw_socket,
     })
 }
 
@@ -150,7 +154,13 @@ pub(crate) fn join_raw_multicast_group(
         )
     })?;
 
-    super::join_multicast_group(membership_socket, &config.membership_compat_config())
+    let compat_config = config.membership_compat_config();
+    super::join_multicast_group(membership_socket, &compat_config)?;
+
+    #[cfg(windows)]
+    join_windows_raw_receive_sockets(socket, &compat_config);
+
+    Ok(())
 }
 
 pub(crate) fn leave_raw_multicast_group(
@@ -163,7 +173,13 @@ pub(crate) fn leave_raw_multicast_group(
         )
     })?;
 
-    super::leave_multicast_group(membership_socket, &config.membership_compat_config())
+    let compat_config = config.membership_compat_config();
+    super::leave_multicast_group(membership_socket, &compat_config)?;
+
+    #[cfg(windows)]
+    leave_windows_raw_receive_sockets(socket, &compat_config);
+
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -273,12 +289,31 @@ pub(crate) fn recv_raw_packet(
     subscription_id: SubscriptionId,
     config: &RawSubscriptionConfig,
 ) -> Result<Option<RawPacket>, McrxError> {
+    if let Some(packet) =
+        recv_raw_packet_from_windows_socket(&socket.receive_socket, subscription_id, config)?
+    {
+        return Ok(Some(packet));
+    }
+
+    if let Some(udp_socket) = &socket.windows_udp_receive_socket {
+        return recv_raw_packet_from_windows_socket(udp_socket, subscription_id, config);
+    }
+
+    Ok(None)
+}
+
+#[cfg(windows)]
+fn recv_raw_packet_from_windows_socket(
+    receive_socket: &Socket,
+    subscription_id: SubscriptionId,
+    config: &RawSubscriptionConfig,
+) -> Result<Option<RawPacket>, McrxError> {
     let mut buf = [std::mem::MaybeUninit::<u8>::uninit(); 65535];
 
     loop {
         let len = unsafe {
             windows_sys::Win32::Networking::WinSock::recv(
-                windows_raw_socket(socket.socket()),
+                windows_raw_socket(receive_socket),
                 buf.as_mut_ptr().cast(),
                 buf.len() as i32,
                 0,
@@ -563,6 +598,55 @@ fn open_windows_raw_socket(interface: Ipv4Addr) -> Result<Socket, McrxError> {
 
     enable_windows_raw_capture(&socket)?;
     Ok(socket)
+}
+
+#[cfg(windows)]
+fn open_windows_udp_raw_socket(interface: Ipv4Addr) -> Result<Socket, McrxError> {
+    let socket = Socket::new(
+        Domain::IPV4,
+        Type::RAW,
+        Some(Protocol::from(IPPROTO_UDP as i32)),
+    )
+    .map_err(McrxError::RawSocketCreateFailed)?;
+
+    socket
+        .bind(&SockAddr::from(SocketAddrV4::new(interface, 0)))
+        .map_err(McrxError::RawSocketBindFailed)?;
+
+    socket
+        .set_nonblocking(true)
+        .map_err(McrxError::SocketOptionFailed)?;
+
+    Ok(socket)
+}
+
+#[cfg(windows)]
+fn join_windows_raw_receive_sockets(socket: &RawReceiveSocket, config: &crate::SubscriptionConfig) {
+    if !matches!(config.family(), SubscriptionAddressFamily::Ipv4) {
+        return;
+    }
+
+    let _ = super::join_multicast_group(&socket.receive_socket, config);
+
+    if let Some(udp_socket) = &socket.windows_udp_receive_socket {
+        let _ = super::join_multicast_group(udp_socket, config);
+    }
+}
+
+#[cfg(windows)]
+fn leave_windows_raw_receive_sockets(
+    socket: &RawReceiveSocket,
+    config: &crate::SubscriptionConfig,
+) {
+    if !matches!(config.family(), SubscriptionAddressFamily::Ipv4) {
+        return;
+    }
+
+    let _ = super::leave_multicast_group(&socket.receive_socket, config);
+
+    if let Some(udp_socket) = &socket.windows_udp_receive_socket {
+        let _ = super::leave_multicast_group(udp_socket, config);
+    }
 }
 
 #[cfg(windows)]

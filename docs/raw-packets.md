@@ -146,6 +146,9 @@ Practical notes:
 - IPv4 raw receive requires an explicit local IPv4 interface address
 - the implementation first tries Windows multicast-only capture and falls back
   to ordinary raw capture if needed
+- Windows also opens an IPv4/UDP raw receive socket as a pragmatic fallback for
+  adapters that expose multicast control traffic through raw capture but do not
+  surface UDP multicast data there
 - IPv6 raw receive currently returns
   `McrxError::RawPacketReceiveUnsupported(...)`
 
