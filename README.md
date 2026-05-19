@@ -6,7 +6,8 @@ ASM/SSM.
 The default API receives UDP multicast payloads through explicit
 `add`/`join`/`leave` subscription lifecycle calls. Optional features add Tokio
 integration, metrics, raw IP datagram receive, and Python bindings without
-changing the default UDP receive path.
+changing the default UDP receive path. Sibling crates provide Python and C ABI
+bindings for non-Rust consumers.
 
 ## Highlights
 
@@ -18,6 +19,7 @@ changing the default UDP receive path.
 - Optional pktinfo-style receive metadata
 - Optional `tokio`, `metrics`, and `raw-packets` features
 - Optional Python bindings in the sibling `mcrx-core-py` crate
+- Optional C ABI bindings in the sibling `mcrx-core-ffi` crate
 
 ## Install
 
@@ -57,6 +59,7 @@ if let Some(packet) = ctx.try_recv_any()? {
 - `metrics`: snapshots, deltas, samplers, and JSONL helpers.
 - `raw-packets`: complete multicast IP datagram receive for AMT-style use cases.
 - `mcrx-core-py`: sibling workspace crate with Python and asyncio bindings.
+- `mcrx-core-ffi`: sibling workspace crate with a small C ABI for Swift/C/C++.
 
 ## Documentation
 
@@ -66,6 +69,7 @@ if let Some(packet) = ctx.try_recv_any()? {
 - [Demo Binaries](docs/demo.md): receiver CLI commands and metrics examples.
 - [Metrics](docs/metrics.md): snapshot, delta, and JSONL semantics.
 - [Python Bindings](docs/python.md): Python API and asyncio helper.
+- [C FFI Bindings](mcrx-core-ffi/README.md): C ABI and iOS XCFramework sketch.
 - [Architecture](docs/architecture.md): main types and module layout.
 - [Design Decisions](docs/design-decisions.md): why the API is shaped this way.
 

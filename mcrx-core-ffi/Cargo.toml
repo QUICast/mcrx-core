@@ -1,0 +1,25 @@
+[package]
+name = "mcrx-core-ffi"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-2-Clause"
+description = "C ABI bindings for the mcrx-core multicast receiver library."
+repository = "https://github.com/QUICast/mcrx-core"
+homepage = "https://github.com/QUICast/mcrx-core"
+readme = "README.md"
+
+[lib]
+crate-type = ["staticlib", "cdylib"]
+
+[features]
+default = []
+metrics = ["mcrx-core/metrics"]
+raw-packets = ["mcrx-core/raw-packets"]
+tokio = ["mcrx-core/tokio"]
+
+[dependencies]
+mcrx-core = { version = "0.2.6", path = ".." }
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_NetworkManagement_IpHelper"] }

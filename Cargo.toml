@@ -12,7 +12,7 @@ keywords = ["multicast", "udp", "asm", "ssm", "networking"]
 categories = ["network-programming"]
 
 [workspace]
-members = ["mcrx-core-py"]
+members = ["mcrx-core-ffi", "mcrx-core-py"]
 
 [features]
 default = []
