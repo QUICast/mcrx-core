@@ -41,8 +41,5 @@ xcodebuild -create-xcframework \
   -output McrxCore.xcframework
 ```
 
-The physical-device probe app lives in `examples/ios/McrxProbe` within this
-crate and expects that local `McrxCore.xcframework`.
-
 Physical iOS devices still need Apple local-network privacy configuration and,
 for custom multicast/broadcast use, the multicast networking entitlement.

@@ -2,6 +2,9 @@
 /target
 /McrxCore.xcframework
 /mcrx-core-ffi/McrxCore.xcframework
+/.local-examples/
+/examples/ios/
+/mcrx-core-ffi/examples/ios/
 **/*.rs.bk
 .DS_Store
 Cargo.lock
