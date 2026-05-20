@@ -125,6 +125,9 @@ enum DetailedReceiveMode {
     Ancillary,
 }
 
+#[cfg(any(unix, windows))]
+const ANCILLARY_STACK_BUFFER_SIZE: usize = 256;
+
 #[cfg(windows)]
 type WsaRecvMsgFn = unsafe extern "system" fn(
     SOCKET,
@@ -1011,7 +1014,15 @@ fn recv_packet_with_metadata_unix(
         iov_base: buf.as_mut_ptr().cast(),
         iov_len: buf.len(),
     };
-    let mut control = vec![std::mem::MaybeUninit::<u8>::uninit(); ancillary_buffer_size(family)];
+    let control_size = ancillary_buffer_size(family);
+    let mut control_stack = [std::mem::MaybeUninit::<u8>::uninit(); ANCILLARY_STACK_BUFFER_SIZE];
+    let mut control_heap;
+    let control = if control_size <= ANCILLARY_STACK_BUFFER_SIZE {
+        &mut control_stack[..control_size]
+    } else {
+        control_heap = vec![std::mem::MaybeUninit::<u8>::uninit(); control_size];
+        control_heap.as_mut_slice()
+    };
     let mut control_len = 0usize;
 
     let (len, addr) = match unsafe {
@@ -1080,14 +1091,22 @@ fn recv_packet_with_metadata_windows(
     let family = config.family();
     let recvmsg = match socket.wsarecvmsg() {
         Some(recvmsg) => recvmsg,
-        None => return recv_packet_impl(socket, subscription_id, config, true),
+        None => return recv_packet_impl(socket, subscription_id, config),
     };
     let mut buf = [std::mem::MaybeUninit::<u8>::uninit(); 65535];
     let mut data_buf = WSABUF {
         len: buf.len() as u32,
         buf: buf.as_mut_ptr().cast(),
     };
-    let mut control = vec![std::mem::MaybeUninit::<u8>::uninit(); ancillary_buffer_size(family)];
+    let control_size = ancillary_buffer_size(family);
+    let mut control_stack = [std::mem::MaybeUninit::<u8>::uninit(); ANCILLARY_STACK_BUFFER_SIZE];
+    let mut control_heap;
+    let control = if control_size <= ANCILLARY_STACK_BUFFER_SIZE {
+        &mut control_stack[..control_size]
+    } else {
+        control_heap = vec![std::mem::MaybeUninit::<u8>::uninit(); control_size];
+        control_heap.as_mut_slice()
+    };
     let mut bytes_received = 0u32;
 
     let (msg, addr) = match unsafe {
@@ -1182,7 +1201,7 @@ fn recv_packet_with_ancillary_metadata(
     subscription_id: SubscriptionId,
     config: &SubscriptionConfig,
 ) -> Result<Option<PacketWithMetadata>, McrxError> {
-    recv_packet_impl(socket, subscription_id, config, true)
+    recv_packet_impl(socket, subscription_id, config)
 }
 
 /// Opens and binds a UDP socket for the given subscription configuration.
@@ -1469,7 +1488,6 @@ fn recv_packet_impl(
     socket: &ReceiveSocket,
     subscription_id: SubscriptionId,
     config: &SubscriptionConfig,
-    include_metadata: bool,
 ) -> Result<Option<PacketWithMetadata>, McrxError> {
     let group = config.group;
     let mut buf = [std::mem::MaybeUninit::<u8>::uninit(); 65535];
@@ -1483,12 +1501,6 @@ fn recv_packet_impl(
             let payload_bytes =
                 unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, len) };
 
-            let metadata = if include_metadata {
-                socket.base_metadata(config)?
-            } else {
-                ReceiveMetadata::empty()
-            };
-
             Ok(Some(PacketWithMetadata {
                 packet: Packet {
                     subscription_id,
@@ -1497,7 +1509,7 @@ fn recv_packet_impl(
                     dst_port: config.dst_port,
                     payload: Bytes::copy_from_slice(payload_bytes),
                 },
-                metadata,
+                metadata: socket.base_metadata(config)?,
             }))
         }
         Err(err) if err.kind() == ErrorKind::WouldBlock => Ok(None),
@@ -1511,8 +1523,29 @@ pub(crate) fn recv_packet(
     subscription_id: SubscriptionId,
     config: &SubscriptionConfig,
 ) -> Result<Option<Packet>, McrxError> {
-    Ok(recv_packet_impl(socket, subscription_id, config, false)?
-        .map(PacketWithMetadata::into_packet))
+    let group = config.group;
+    let mut buf = [std::mem::MaybeUninit::<u8>::uninit(); 65535];
+
+    match socket.socket().recv_from(&mut buf) {
+        Ok((len, addr)) => {
+            let source = addr.as_socket().ok_or(McrxError::NonIpSocketAddress)?;
+
+            // SAFETY: `recv_from` initialized exactly the first `len` bytes of `buf`.
+            // We only create a slice over that initialized prefix, and copy it immediately.
+            let payload_bytes =
+                unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, len) };
+
+            Ok(Some(Packet {
+                subscription_id,
+                source,
+                group,
+                dst_port: config.dst_port,
+                payload: Bytes::copy_from_slice(payload_bytes),
+            }))
+        }
+        Err(err) if err.kind() == ErrorKind::WouldBlock => Ok(None),
+        Err(err) => Err(McrxError::ReceiveFailed(err)),
+    }
 }
 
 /// Attempts to receive a packet and richer receive metadata without blocking.
@@ -1525,7 +1558,7 @@ pub(crate) fn recv_packet_with_metadata(
         return recv_packet_with_ancillary_metadata(socket, subscription_id, config);
     }
 
-    recv_packet_impl(socket, subscription_id, config, true)
+    recv_packet_impl(socket, subscription_id, config)
 }
 
 #[cfg(test)]

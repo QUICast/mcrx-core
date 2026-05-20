@@ -294,11 +294,16 @@ impl Context {
             return Ok(None);
         }
 
-        for offset in 0..subscription_count {
-            let index = (self.next_recv_index + offset) % subscription_count;
+        let mut index = self.next_recv_index;
+
+        for _ in 0..subscription_count {
             let subscription = &self.subscriptions[index];
 
             if !subscription.is_joined() {
+                index += 1;
+                if index == subscription_count {
+                    index = 0;
+                }
                 continue;
             }
 
@@ -321,6 +326,11 @@ impl Context {
 
                     return Err(err);
                 }
+            }
+
+            index += 1;
+            if index == subscription_count {
+                index = 0;
             }
         }
 
@@ -469,21 +479,10 @@ impl Context {
     /// It may result in unbounded growth of `out` if a large number of packets are queued,
     /// so callers should ensure capacity if needed.
     pub fn try_recv_all_into(&mut self, out: &mut Vec<Packet>) -> Result<usize, McrxError> {
-        let mut total_received = 0;
-
         #[cfg(feature = "metrics")]
         self.record_batch_call();
 
-        loop {
-            let received = self.try_recv_batch_into_impl(out, usize::MAX)?;
-            total_received += received;
-
-            if received == 0 {
-                break;
-            }
-        }
-
-        Ok(total_received)
+        self.try_recv_batch_into_impl(out, usize::MAX)
     }
 
     /// Attempts to receive all currently available packets with richer receive
@@ -492,21 +491,10 @@ impl Context {
         &mut self,
         out: &mut Vec<PacketWithMetadata>,
     ) -> Result<usize, McrxError> {
-        let mut total_received = 0;
-
         #[cfg(feature = "metrics")]
         self.record_batch_call();
 
-        loop {
-            let received = self.try_recv_batch_with_metadata_into_impl(out, usize::MAX)?;
-            total_received += received;
-
-            if received == 0 {
-                break;
-            }
-        }
-
-        Ok(total_received)
+        self.try_recv_batch_with_metadata_into_impl(out, usize::MAX)
     }
 }
 

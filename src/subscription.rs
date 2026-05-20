@@ -45,6 +45,13 @@ pub struct SubscriptionParts {
 
 #[cfg(feature = "metrics")]
 #[derive(Debug)]
+struct LastPacketMetrics {
+    source: Option<SocketAddr>,
+    receive_at: Option<SystemTime>,
+}
+
+#[cfg(feature = "metrics")]
+#[derive(Debug)]
 struct SubscriptionMetricsInner {
     packets_received: AtomicU64,
     bytes_received: AtomicU64,
@@ -53,8 +60,7 @@ struct SubscriptionMetricsInner {
     join_count: AtomicU64,
     leave_count: AtomicU64,
     last_payload_len: AtomicUsize,
-    last_source: Mutex<Option<SocketAddr>>,
-    last_receive_at: Mutex<Option<SystemTime>>,
+    last_packet: Mutex<LastPacketMetrics>,
 }
 
 #[cfg(feature = "metrics")]
@@ -68,8 +74,10 @@ impl Default for SubscriptionMetricsInner {
             join_count: AtomicU64::new(0),
             leave_count: AtomicU64::new(0),
             last_payload_len: AtomicUsize::new(usize::MAX),
-            last_source: Mutex::new(None),
-            last_receive_at: Mutex::new(None),
+            last_packet: Mutex::new(LastPacketMetrics {
+                source: None,
+                receive_at: None,
+            }),
         }
     }
 }
@@ -116,8 +124,9 @@ impl Subscription {
         self.metrics
             .last_payload_len
             .store(packet.payload.len(), Ordering::Relaxed);
-        *Self::lock_unpoisoned(&self.metrics.last_source) = Some(packet.source);
-        *Self::lock_unpoisoned(&self.metrics.last_receive_at) = Some(SystemTime::now());
+        let mut last_packet = Self::lock_unpoisoned(&self.metrics.last_packet);
+        last_packet.source = Some(packet.source);
+        last_packet.receive_at = Some(SystemTime::now());
     }
 
     #[cfg(feature = "metrics")]
@@ -294,6 +303,7 @@ impl Subscription {
             usize::MAX => None,
             payload_len => Some(payload_len),
         };
+        let last_packet = Self::lock_unpoisoned(&self.metrics.last_packet);
 
         SubscriptionMetricsSnapshot {
             packets_received: self.metrics.packets_received.load(Ordering::Relaxed),
@@ -303,8 +313,8 @@ impl Subscription {
             join_count: self.metrics.join_count.load(Ordering::Relaxed),
             leave_count: self.metrics.leave_count.load(Ordering::Relaxed),
             last_payload_len,
-            last_source: *Self::lock_unpoisoned(&self.metrics.last_source),
-            last_receive_at: *Self::lock_unpoisoned(&self.metrics.last_receive_at),
+            last_source: last_packet.source,
+            last_receive_at: last_packet.receive_at,
             captured_at: SystemTime::now(),
         }
     }

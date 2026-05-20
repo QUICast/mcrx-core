@@ -23,6 +23,8 @@ use std::net::{SocketAddrV4, SocketAddrV6};
 use std::os::fd::{AsRawFd, FromRawFd};
 #[cfg(windows)]
 use std::os::windows::io::{AsRawSocket, RawSocket};
+#[cfg(target_os = "macos")]
+use std::sync::Mutex;
 #[cfg(windows)]
 use windows_sys::Win32::Networking::WinSock::{
     IPPROTO_IP, IPPROTO_UDP, RCVALL_ON, SIO_RCVALL, SIO_RCVALL_MCAST, SOCKET, SOCKET_ERROR,
@@ -36,6 +38,8 @@ pub(crate) struct RawReceiveSocket {
     windows_udp_receive_socket: Option<Socket>,
     #[cfg(target_os = "macos")]
     apple_bpf_buffer_len: usize,
+    #[cfg(target_os = "macos")]
+    apple_bpf_buffer: Mutex<Vec<u8>>,
     #[cfg(target_os = "macos")]
     apple_bpf_datalink: u32,
     #[cfg(target_os = "macos")]
@@ -108,6 +112,7 @@ pub(crate) fn open_raw_socket(
         receive_socket: bpf_socket.socket,
         membership_socket: Some(membership_socket),
         apple_bpf_buffer_len: bpf_socket.buffer_len,
+        apple_bpf_buffer: Mutex::new(vec![0u8; bpf_socket.buffer_len]),
         apple_bpf_datalink: bpf_socket.datalink,
         apple_interface_index: Some(interface_index),
     })
@@ -266,10 +271,14 @@ pub(crate) fn recv_raw_packet(
     subscription_id: SubscriptionId,
     config: &RawSubscriptionConfig,
 ) -> Result<Option<RawPacket>, McrxError> {
-    let mut buf = vec![0u8; socket.apple_bpf_buffer_len];
     let mut filtered_reads = 0usize;
 
     loop {
+        let mut buf = socket.apple_bpf_buffer.lock().map_err(|_| {
+            McrxError::ReceiveFailed(std::io::Error::other("macOS BPF buffer mutex is poisoned"))
+        })?;
+        debug_assert_eq!(buf.len(), socket.apple_bpf_buffer_len);
+
         let len = unsafe {
             libc::read(
                 socket.socket().as_raw_fd(),

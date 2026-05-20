@@ -60,8 +60,8 @@ At the context level, these snapshot fields are cumulative totals:
 - `batch_packets_received`
 
 `batch_calls` counts public calls to `Context::try_recv_batch_*()` and
-`Context::try_recv_all_*()`. It does not count the internal empty probe that
-`try_recv_all_*()` uses to detect that a drain is complete.
+`Context::try_recv_all_*()`. A `try_recv_all_*()` call drains through the same
+internal batch path and records one public batch call.
 
 At the subscription level, the per-subscription snapshot counters remain
 cumulative for the lifetime of that subscription object.

@@ -1,6 +1,7 @@
 /.idea
 /target
 /McrxCore.xcframework
+/mcrx-core-ffi/McrxCore.xcframework
 **/*.rs.bk
 .DS_Store
 Cargo.lock

@@ -34,6 +34,39 @@ pub struct MetricsJsonlOutputConfig {
     pub flags: Map<String, Value>,
 }
 
+/// Stateful JSONL writer that validates/writes the header once and then keeps
+/// the file open for compact sample appends.
+#[cfg(feature = "metrics")]
+#[derive(Debug)]
+pub struct MetricsJsonlWriter {
+    path: PathBuf,
+    file: File,
+}
+
+#[cfg(feature = "metrics")]
+impl MetricsJsonlWriter {
+    /// Opens a JSONL output path and ensures the requested single header exists.
+    pub fn open(path: impl Into<PathBuf>, header: &Value) -> Result<Self, std::io::Error> {
+        let path = path.into();
+        ensure_single_header(&path, header)?;
+        let file = OpenOptions::new().create(true).append(true).open(&path)?;
+
+        Ok(Self { path, file })
+    }
+
+    /// Returns the output path owned by this writer.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Appends one compact sample row without revalidating the header.
+    pub fn append_sample_row(&mut self, sample: &Value) -> Result<(), std::io::Error> {
+        serde_json::to_writer(&mut self.file, sample).map_err(std::io::Error::other)?;
+        self.file.write_all(b"\n")?;
+        Ok(())
+    }
+}
+
 /// Infers a `node_id` from a metrics file path.
 ///
 /// Resolution order:
@@ -276,6 +309,61 @@ mod tests {
         assert_eq!(parsed_header["artifact_type"], NETWORK_ARTIFACT_TYPE);
         assert_eq!(parsed_header["node_id"], parent_name);
         assert!(parsed_header["flags"].is_object());
+
+        for sample_line in &lines[1..] {
+            let sample: Value = serde_json::from_str(sample_line).unwrap();
+            assert!(sample.get("schema").is_none());
+            assert!(sample.get("artifact_type").is_none());
+            assert!(sample.get("node_id").is_none());
+            assert!(sample.get("producer").is_none());
+            assert!(sample.get("flags").is_none());
+        }
+
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_dir(parent);
+    }
+
+    #[test]
+    fn stateful_writer_validates_header_once_and_appends_compact_samples() {
+        let parent_name = format!(
+            "mcrx_jsonl_writer_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or(Duration::ZERO)
+                .as_nanos()
+        );
+        let parent = std::env::temp_dir().join(&parent_name);
+        fs::create_dir_all(&parent).unwrap();
+        let path = parent.join("network.jsonl");
+
+        let mut flags = Map::new();
+        flags.insert("role".to_string(), Value::String("receiver".to_string()));
+        let header = header_json(
+            NETWORK_ARTIFACT_TYPE,
+            "mcrx-core/test",
+            &infer_node_id_from_path(&path),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(10),
+            &flags,
+        );
+
+        let mut writer = MetricsJsonlWriter::open(path.clone(), &header).unwrap();
+        assert_eq!(writer.path(), path.as_path());
+        writer
+            .append_sample_row(&json!({"ts": 11.0, "interval_secs": 1.0}))
+            .unwrap();
+        writer
+            .append_sample_row(&json!({"ts": 12.0, "interval_secs": 1.0}))
+            .unwrap();
+        drop(writer);
+
+        let contents = fs::read_to_string(&path).unwrap();
+        let lines = contents
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect::<Vec<_>>();
+
+        assert_eq!(lines.len(), 3);
+        assert!(is_header_object(&serde_json::from_str(lines[0]).unwrap()));
 
         for sample_line in &lines[1..] {
             let sample: Value = serde_json::from_str(sample_line).unwrap();

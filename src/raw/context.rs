@@ -120,17 +120,27 @@ impl RawContext {
             return Ok(None);
         }
 
-        for offset in 0..subscription_count {
-            let index = (self.next_recv_index + offset) % subscription_count;
+        let mut index = self.next_recv_index;
+
+        for _ in 0..subscription_count {
             let subscription = &self.subscriptions[index];
 
             if !subscription.is_joined() {
+                index += 1;
+                if index == subscription_count {
+                    index = 0;
+                }
                 continue;
             }
 
             if let Some(packet) = subscription.try_recv()? {
                 self.next_recv_index = (index + 1) % subscription_count;
                 return Ok(Some(packet));
+            }
+
+            index += 1;
+            if index == subscription_count {
+                index = 0;
             }
         }
 

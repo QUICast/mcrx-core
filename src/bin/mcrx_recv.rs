@@ -3,8 +3,8 @@ mod recv_args;
 
 #[cfg(feature = "metrics")]
 use mcrx_core::jsonl::{
-    HARDWARE_ARTIFACT_TYPE, MetricsJsonlOutputConfig, NETWORK_ARTIFACT_TYPE,
-    append_jsonl_sample_row, header_json, infer_node_id_from_path, unix_timestamp_secs,
+    HARDWARE_ARTIFACT_TYPE, MetricsJsonlOutputConfig, MetricsJsonlWriter, NETWORK_ARTIFACT_TYPE,
+    header_json, infer_node_id_from_path, unix_timestamp_secs,
 };
 use mcrx_core::{Context, SubscriptionConfig};
 #[cfg(feature = "metrics")]
@@ -22,7 +22,7 @@ use std::process;
 use std::thread;
 use std::time::Duration;
 #[cfg(feature = "metrics")]
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const MAX_PREVIEW_LEN: usize = 64;
@@ -96,6 +96,14 @@ fn run() -> Result<(), String> {
     #[cfg(feature = "metrics")]
     let mut hardware_metrics_sampler = init_hardware_metrics_sampler()?;
     #[cfg(feature = "metrics")]
+    let mut metrics_jsonl_writers = match &summary_output {
+        Some(output) => Some(
+            metrics_jsonl_writers_from_output(output, hardware_metrics_sampler.is_some())
+                .map_err(|err| format!("failed to initialize metrics JSONL output: {err}"))?,
+        ),
+        None => None,
+    };
+    #[cfg(feature = "metrics")]
     let mut next_summary_at = summary_interval.map(|interval| Instant::now() + interval);
 
     loop {
@@ -126,8 +134,8 @@ fn run() -> Result<(), String> {
             let snapshot = ctx.metrics_snapshot();
 
             if let Some(delta) = metrics_sampler.sample(snapshot.clone()) {
-                if let Some(output) = &summary_output {
-                    write_metrics_summary_jsonl(&snapshot, &delta, output)
+                if let Some(writers) = metrics_jsonl_writers.as_mut() {
+                    write_metrics_summary_jsonl(&snapshot, &delta, &mut writers.network)
                         .map_err(|err| format!("failed to write metrics summary: {err}"))?;
                 } else {
                     print_metrics_summary(&snapshot, &delta);
@@ -138,11 +146,13 @@ fn run() -> Result<(), String> {
                 && let Some(hardware_snapshot) = capture_hardware_metrics_snapshot()?
                 && let Some(delta) = hardware_sampler.sample(hardware_snapshot.clone())
             {
-                if let Some(output) = &summary_output {
-                    write_hardware_metrics_summary_jsonl(&hardware_snapshot, &delta, output)
-                        .map_err(|err| {
-                            format!("failed to write hardware metrics summary: {err}")
-                        })?;
+                if let Some(writers) = metrics_jsonl_writers.as_mut() {
+                    if let Some(writer) = writers.hardware.as_mut() {
+                        write_hardware_metrics_summary_jsonl(&hardware_snapshot, &delta, writer)
+                            .map_err(|err| {
+                                format!("failed to write hardware metrics summary: {err}")
+                            })?;
+                    }
                 } else {
                     print_hardware_metrics_summary(&hardware_snapshot, &delta);
                 }
@@ -340,6 +350,47 @@ fn summary_output_from_env(
 }
 
 #[cfg(feature = "metrics")]
+#[derive(Debug)]
+struct MetricsJsonlWriters {
+    network: MetricsJsonlWriter,
+    hardware: Option<MetricsJsonlWriter>,
+}
+
+#[cfg(feature = "metrics")]
+fn metrics_jsonl_writers_from_output(
+    output: &MetricsJsonlOutputConfig,
+    include_hardware: bool,
+) -> Result<MetricsJsonlWriters, std::io::Error> {
+    let created_at = SystemTime::now();
+    let network_header = header_json(
+        NETWORK_ARTIFACT_TYPE,
+        RECEIVER_PRODUCER,
+        &output.node_id,
+        created_at,
+        &output.flags,
+    );
+    let network = MetricsJsonlWriter::open(output.network_path.clone(), &network_header)?;
+
+    let hardware = if include_hardware {
+        let hardware_header = header_json(
+            HARDWARE_ARTIFACT_TYPE,
+            RECEIVER_PRODUCER,
+            &output.node_id,
+            created_at,
+            &output.flags,
+        );
+        Some(MetricsJsonlWriter::open(
+            hardware_summary_file_path(&output.network_path),
+            &hardware_header,
+        )?)
+    } else {
+        None
+    };
+
+    Ok(MetricsJsonlWriters { network, hardware })
+}
+
+#[cfg(feature = "metrics")]
 fn init_hardware_metrics_sampler() -> Result<Option<HardwareMetricsSampler>, String> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
@@ -376,15 +427,8 @@ fn capture_hardware_metrics_snapshot() -> Result<Option<HardwareMetricsSnapshot>
 fn write_metrics_summary_jsonl(
     snapshot: &ContextMetricsSnapshot,
     delta: &ContextMetricsDelta,
-    output: &MetricsJsonlOutputConfig,
+    writer: &mut MetricsJsonlWriter,
 ) -> Result<(), std::io::Error> {
-    let header = header_json(
-        NETWORK_ARTIFACT_TYPE,
-        RECEIVER_PRODUCER,
-        &output.node_id,
-        snapshot.captured_at,
-        &output.flags,
-    );
     let sample = json!({
         "ts": unix_timestamp_secs(snapshot.captured_at),
         "interval_secs": delta.interval_secs,
@@ -412,23 +456,15 @@ fn write_metrics_summary_jsonl(
         "receive_errors_per_sec": delta.receive_errors_per_sec(),
     });
 
-    append_jsonl_sample_row(&output.network_path, &header, &sample)
+    writer.append_sample_row(&sample)
 }
 
 #[cfg(feature = "metrics")]
 fn write_hardware_metrics_summary_jsonl(
     snapshot: &HardwareMetricsSnapshot,
     delta: &HardwareMetricsDelta,
-    output: &MetricsJsonlOutputConfig,
+    writer: &mut MetricsJsonlWriter,
 ) -> Result<(), std::io::Error> {
-    let hardware_path = hardware_summary_file_path(&output.network_path);
-    let header = header_json(
-        HARDWARE_ARTIFACT_TYPE,
-        RECEIVER_PRODUCER,
-        &output.node_id,
-        snapshot.captured_at,
-        &output.flags,
-    );
     let sample = json!({
         "ts": unix_timestamp_secs(snapshot.captured_at),
         "interval_secs": delta.interval_secs,
@@ -446,7 +482,7 @@ fn write_hardware_metrics_summary_jsonl(
         "ctx_switches_involuntary": delta.ctx_switches_involuntary,
     });
 
-    append_jsonl_sample_row(&hardware_path, &header, &sample)
+    writer.append_sample_row(&sample)
 }
 
 #[cfg(feature = "metrics")]
@@ -618,6 +654,7 @@ mod tests {
             flags,
             network_path: path.clone(),
         };
+        let mut writers = metrics_jsonl_writers_from_output(&output, false).unwrap();
 
         let snapshot = ContextMetricsSnapshot {
             subscriptions_added: 1,
@@ -647,7 +684,7 @@ mod tests {
             batch_packets_received: 5,
         };
 
-        write_metrics_summary_jsonl(&snapshot, &delta, &output).unwrap();
+        write_metrics_summary_jsonl(&snapshot, &delta, &mut writers.network).unwrap();
 
         let later_snapshot = ContextMetricsSnapshot {
             total_packets_received: 15,
@@ -673,7 +710,7 @@ mod tests {
             batch_packets_received: 5,
         };
 
-        write_metrics_summary_jsonl(&later_snapshot, &later_delta, &output).unwrap();
+        write_metrics_summary_jsonl(&later_snapshot, &later_delta, &mut writers.network).unwrap();
 
         let contents = fs::read_to_string(&path).unwrap();
         let lines = contents
@@ -772,34 +809,7 @@ mod tests {
             network_path: path.clone(),
         };
 
-        let snapshot = ContextMetricsSnapshot {
-            subscriptions_added: 1,
-            subscriptions_removed: 0,
-            active_subscriptions: 1,
-            joined_subscriptions: 1,
-            total_packets_received: 1,
-            total_bytes_received: 10,
-            total_would_block_count: 0,
-            total_receive_errors: 0,
-            total_join_count: 1,
-            total_leave_count: 0,
-            batch_calls: 1,
-            batch_packets_received: 1,
-            captured_at: SystemTime::UNIX_EPOCH + Duration::from_secs(1),
-        };
-        let delta = ContextMetricsDelta {
-            interval_secs: 1.0,
-            packets_received: 1,
-            bytes_received: 10,
-            would_block_count: 0,
-            receive_errors: 0,
-            join_count: 1,
-            leave_count: 0,
-            batch_calls: 1,
-            batch_packets_received: 1,
-        };
-
-        let err = write_metrics_summary_jsonl(&snapshot, &delta, &output).unwrap_err();
+        let err = metrics_jsonl_writers_from_output(&output, false).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
 
         let _ = fs::remove_file(&path);

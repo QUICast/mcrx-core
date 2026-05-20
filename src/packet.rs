@@ -37,6 +37,7 @@ pub struct ReceiveMetadata {
 }
 
 impl ReceiveMetadata {
+    #[cfg_attr(not(feature = "raw-packets"), allow(dead_code))]
     pub(crate) fn empty() -> Self {
         Self {
             socket_local_addr: None,
