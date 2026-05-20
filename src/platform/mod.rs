@@ -330,6 +330,37 @@ pub(crate) fn resolve_ipv6_interface_index(interface: Ipv6Addr) -> Result<u32, M
     }
 }
 
+#[cfg(all(unix, target_vendor = "apple"))]
+fn resolve_default_ipv4_interface(source: Ipv4Addr) -> Result<Ipv4Addr, McrxError> {
+    let probe = std::net::UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))
+        .map_err(McrxError::InterfaceProbeBindFailed)?;
+    probe
+        .connect(SocketAddrV4::new(source, 9))
+        .map_err(McrxError::InterfaceProbeConnectFailed)?;
+
+    match probe
+        .local_addr()
+        .map_err(McrxError::InterfaceProbeLocalAddrFailed)?
+    {
+        SocketAddr::V4(addr) if !addr.ip().is_unspecified() => Ok(*addr.ip()),
+        local_addr => Err(McrxError::InterfaceDiscoveryFailed(format!(
+            "failed to infer default IPv4 interface for source {source}: probe bound to {local_addr}"
+        ))),
+    }
+}
+
+#[cfg(all(unix, target_vendor = "apple"))]
+fn resolve_ipv4_source_interface_address(
+    interface: Ipv4Addr,
+    source: Ipv4Addr,
+) -> Result<Ipv4Addr, McrxError> {
+    if interface.is_unspecified() {
+        resolve_default_ipv4_interface(source)
+    } else {
+        Ok(interface)
+    }
+}
+
 #[cfg(windows)]
 pub(crate) fn resolve_ipv6_interface_index(interface: Ipv6Addr) -> Result<u32, McrxError> {
     const INITIAL_BUFFER_SIZE: usize = 15_000;
@@ -446,6 +477,44 @@ fn get_wsarecvmsg(socket: &Socket) -> Result<WsaRecvMsgFn, McrxError> {
         None => Err(McrxError::SocketIoctlFailed(std::io::Error::other(
             "WSARecvMsg lookup returned null",
         ))),
+    }
+}
+
+#[cfg(all(unix, target_vendor = "apple"))]
+fn set_ipv4_source_membership_option(
+    socket: &Socket,
+    option_name: libc::c_int,
+    group: Ipv4Addr,
+    source: Ipv4Addr,
+    interface: Ipv4Addr,
+) -> std::io::Result<()> {
+    let request = libc::ip_mreq_source {
+        imr_multiaddr: ipv4_in_addr(group),
+        imr_sourceaddr: ipv4_in_addr(source),
+        imr_interface: ipv4_in_addr(interface),
+    };
+
+    let result = unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::IPPROTO_IP,
+            option_name,
+            (&request as *const libc::ip_mreq_source).cast(),
+            std::mem::size_of_val(&request) as libc::socklen_t,
+        )
+    };
+
+    if result == -1 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(all(unix, target_vendor = "apple"))]
+fn ipv4_in_addr(addr: Ipv4Addr) -> libc::in_addr {
+    libc::in_addr {
+        s_addr: u32::from_ne_bytes(addr.octets()),
     }
 }
 
@@ -584,6 +653,72 @@ fn set_ipv6_source_membership_option(
         ErrorKind::Unsupported,
         "IPv6 source-specific multicast is not supported on this platform",
     ))
+}
+
+#[cfg(all(unix, target_vendor = "apple"))]
+fn join_source_multicast_v4(
+    socket: &Socket,
+    group: Ipv4Addr,
+    source: Ipv4Addr,
+    interface: Ipv4Addr,
+) -> Result<(), McrxError> {
+    let interface = resolve_ipv4_source_interface_address(interface, source)?;
+
+    // Darwin advertises protocol-independent source-group APIs, but the
+    // IPv4-specific source-membership API is the reliable path for IPv4 SSM.
+    // Resolve the interface before this call so the kernel is not asked to
+    // infer an interface from 0.0.0.0.
+    set_ipv4_source_membership_option(
+        socket,
+        libc::IP_ADD_SOURCE_MEMBERSHIP,
+        group,
+        source,
+        interface,
+    )
+    .map_err(McrxError::MulticastJoinFailed)
+}
+
+#[cfg(not(all(unix, target_vendor = "apple")))]
+fn join_source_multicast_v4(
+    socket: &Socket,
+    group: Ipv4Addr,
+    source: Ipv4Addr,
+    interface: Ipv4Addr,
+) -> Result<(), McrxError> {
+    socket
+        .join_ssm_v4(&source, &group, &interface)
+        .map_err(McrxError::MulticastJoinFailed)
+}
+
+#[cfg(all(unix, target_vendor = "apple"))]
+fn leave_source_multicast_v4(
+    socket: &Socket,
+    group: Ipv4Addr,
+    source: Ipv4Addr,
+    interface: Ipv4Addr,
+) -> Result<(), McrxError> {
+    let interface = resolve_ipv4_source_interface_address(interface, source)?;
+
+    set_ipv4_source_membership_option(
+        socket,
+        libc::IP_DROP_SOURCE_MEMBERSHIP,
+        group,
+        source,
+        interface,
+    )
+    .map_err(McrxError::MulticastLeaveFailed)
+}
+
+#[cfg(not(all(unix, target_vendor = "apple")))]
+fn leave_source_multicast_v4(
+    socket: &Socket,
+    group: Ipv4Addr,
+    source: Ipv4Addr,
+    interface: Ipv4Addr,
+) -> Result<(), McrxError> {
+    socket
+        .leave_ssm_v4(&source, &group, &interface)
+        .map_err(McrxError::MulticastLeaveFailed)
 }
 
 #[cfg(all(unix, any(target_os = "linux", target_os = "android")))]
@@ -1313,9 +1448,9 @@ pub(crate) fn join_multicast_group(
                     .join_multicast_v4(&membership.group, &interface)
                     .map_err(McrxError::MulticastJoinFailed),
 
-                Some(source) => socket
-                    .join_ssm_v4(&source, &membership.group, &interface)
-                    .map_err(McrxError::MulticastJoinFailed),
+                Some(source) => {
+                    join_source_multicast_v4(socket, membership.group, source, interface)
+                }
             }
         }
         SubscriptionAddressFamily::Ipv6 => {
@@ -1407,9 +1542,9 @@ pub(crate) fn leave_multicast_group(
                     .leave_multicast_v4(&membership.group, &interface)
                     .map_err(McrxError::MulticastLeaveFailed),
 
-                Some(source) => socket
-                    .leave_ssm_v4(&source, &membership.group, &interface)
-                    .map_err(McrxError::MulticastLeaveFailed),
+                Some(source) => {
+                    leave_source_multicast_v4(socket, membership.group, source, interface)
+                }
             }
         }
         SubscriptionAddressFamily::Ipv6 => {

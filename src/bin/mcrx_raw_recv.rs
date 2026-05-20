@@ -100,4 +100,7 @@ fn print_usage(program: &str) {
     eprintln!("  {program} 239.1.2.3 --interface 192.168.1.20");
     eprintln!("  {program} ff3e::8000:1234 --interface 7");
     eprintln!("  {program} ff3e::8000:1234 2001:db8::10 --interface 2001:db8::20");
+    eprintln!("notes:");
+    eprintln!("  - for IPv4 SSM, use 232.0.0.0/8 groups such as 232.1.2.3");
+    eprintln!("  - for IPv6 SSM, use ff3x::/32 groups such as ff3e::8000:1234");
 }

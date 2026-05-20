@@ -68,6 +68,9 @@ sub = ctx.add_subscription(
 sub.join()
 ```
 
+IPv4 SSM uses `232.0.0.0/8` groups. IPv6 SSM uses `ff3x::/32` groups. Passing
+a source with an ASM-range group such as `239.x.x.x` is rejected before join.
+
 ## Asyncio
 
 For direct await-style use:

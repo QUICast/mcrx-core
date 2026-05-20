@@ -35,6 +35,9 @@ Argument meaning:
 - `source` → optional SSM source address
 - `interface` → optional local interface address
 
+For SSM, use IPv4 `232.0.0.0/8` groups or IPv6 `ff3x::/32` groups. ASM-range
+groups such as `239.x.x.x` should omit `source`.
+
 ## Tokio Receiver
 
 ```bash

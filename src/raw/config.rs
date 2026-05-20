@@ -120,6 +120,22 @@ mod tests {
     }
 
     #[test]
+    fn valid_ipv4_ssm_raw_config_passes_validation() {
+        let cfg =
+            RawSubscriptionConfig::ssm(Ipv4Addr::new(232, 1, 2, 3), Ipv4Addr::new(10, 0, 0, 1));
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn ipv4_raw_ssm_requires_232_range() {
+        let cfg =
+            RawSubscriptionConfig::ssm(Ipv4Addr::new(239, 1, 1, 1), Ipv4Addr::new(10, 0, 0, 1));
+
+        let result = cfg.validate();
+        assert!(matches!(result, Err(McrxError::InvalidIpv4SsmGroup)));
+    }
+
+    #[test]
     fn valid_ipv6_ssm_raw_config_passes_validation() {
         let cfg = RawSubscriptionConfig::ssm_v6(
             "ff3e::8000:1234".parse().unwrap(),

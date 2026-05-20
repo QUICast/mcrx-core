@@ -20,6 +20,10 @@ pub enum McrxError {
     #[error("MCRX: IPv6 SSM groups must use the ff3x:: prefix")]
     InvalidIpv6SsmGroup,
 
+    /// The configured IPv4 SSM group is not in the IPv4 SSM range.
+    #[error("MCRX: IPv4 SSM groups must use the 232.0.0.0/8 range")]
+    InvalidIpv4SsmGroup,
+
     /// The configured SSM source address family does not match the group family.
     #[error("MCRX: source address family must match group address family")]
     SourceAddressFamilyMismatch,

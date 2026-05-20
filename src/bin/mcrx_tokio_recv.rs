@@ -162,6 +162,8 @@ fn print_usage(program: &str) {
     eprintln!("  {program} ff3e::8000:1234 5000 --interface 7");
     eprintln!("  {program} ff31::8000:1234 5000 <sender-ipv6> --interface <receiver-ipv6>");
     eprintln!("notes:");
+    eprintln!("  - for IPv4 SSM, use 232.0.0.0/8 groups such as 232.1.2.3");
+    eprintln!("  - for IPv6 SSM, use ff3x::/32 groups such as ff3e::8000:1234");
     eprintln!(
         "  - for IPv6 SSM, pass --interface <receiver-ipv6-or-ifindex>; this is required on macOS"
     );

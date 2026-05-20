@@ -210,10 +210,14 @@ pub(crate) fn validate_multicast_selection(
             return Err(McrxError::SourceAddressFamilyMismatch);
         }
 
-        if let (IpAddr::V6(group), IpAddr::V6(_)) = (group, *source)
-            && !is_ipv6_ssm_group(group)
-        {
-            return Err(McrxError::InvalidIpv6SsmGroup);
+        match (group, *source) {
+            (IpAddr::V4(group), IpAddr::V4(_)) if !is_ipv4_ssm_group(group) => {
+                return Err(McrxError::InvalidIpv4SsmGroup);
+            }
+            (IpAddr::V6(group), IpAddr::V6(_)) if !is_ipv6_ssm_group(group) => {
+                return Err(McrxError::InvalidIpv6SsmGroup);
+            }
+            _ => {}
         }
     }
 
@@ -241,6 +245,10 @@ pub(crate) fn same_family(left: IpAddr, right: IpAddr) -> bool {
         (left, right),
         (IpAddr::V4(_), IpAddr::V4(_)) | (IpAddr::V6(_), IpAddr::V6(_))
     )
+}
+
+pub(crate) fn is_ipv4_ssm_group(group: Ipv4Addr) -> bool {
+    group.octets()[0] == 232
 }
 
 pub(crate) fn is_ipv6_ssm_group(group: Ipv6Addr) -> bool {
@@ -308,6 +316,34 @@ mod tests {
         let result = cfg.validate();
 
         assert!(matches!(result, Err(McrxError::InvalidSourceAddress)));
+    }
+
+    #[test]
+    fn ipv4_ssm_config_passes_validation() {
+        let cfg = SubscriptionConfig::ssm(
+            Ipv4Addr::new(232, 1, 2, 3),
+            Ipv4Addr::new(192, 168, 1, 10),
+            5000,
+        );
+
+        assert!(cfg.validate().is_ok());
+        assert_eq!(
+            cfg.source_addr(),
+            Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)))
+        );
+    }
+
+    #[test]
+    fn ipv4_ssm_requires_232_range() {
+        let cfg = SubscriptionConfig::ssm(
+            Ipv4Addr::new(239, 1, 1, 1),
+            Ipv4Addr::new(192, 168, 1, 10),
+            5000,
+        );
+
+        let result = cfg.validate();
+
+        assert!(matches!(result, Err(McrxError::InvalidIpv4SsmGroup)));
     }
 
     #[test]

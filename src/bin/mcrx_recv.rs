@@ -589,6 +589,7 @@ fn print_usage(program: &str) {
     eprintln!("Notes:");
     eprintln!("  - omit <source> for ASM");
     eprintln!("  - provide <source> for SSM");
+    eprintln!("  - for IPv4 SSM, use 232.0.0.0/8 groups such as 232.1.2.3");
     eprintln!(
         "  - use --interface for ASM when you want to set the join interface without also setting a source"
     );

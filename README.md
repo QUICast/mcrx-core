@@ -77,7 +77,7 @@ if let Some(packet) = ctx.try_recv_any()? {
 
 | OS      | ASM | SSM | Notes    |
 |---------|-----|-----|----------|
-| macOS   | Yes | Yes | Verified |
+| macOS   | Yes | Yes | Verified; see IPv4 SSM note |
 | Linux   | Yes | Yes | Verified |
 | Windows | Yes | Yes | Verified |
 
@@ -113,8 +113,12 @@ SSM cross-platform compatibility:
 
 ## Notes
 
-- macOS may temporarily emit IGMPv2 reports in some SSM setups.
-- That can break SSM behavior on the network until the host state recovers.
+- SSM subscriptions must use SSM group ranges: IPv4 `232.0.0.0/8` or IPv6
+  `ff3x::/32`. ASM-range groups such as `239.x.x.x` must be joined as ASM.
+- macOS IPv4 SSM is wired through the IPv4-specific source-membership API. If a
+  valid `232/8` SSM join still emits IGMPv2 reports on the wire, macOS may have
+  stale IGMP compatibility state; see the troubleshooting note in the
+  [Usage Guide](docs/usage.md).
 
 ## License
 

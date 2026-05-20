@@ -177,6 +177,7 @@ The raw config path reuses the same multicast validation model as the UDP API:
 - source family must match group family
 - interface family must match group family
 - IPv6 interface indexes are supported, IPv4 interface indexes are rejected
+- IPv4 SSM requires `232.0.0.0/8`
 - IPv6 SSM requires `ff3x::/32`
 
 ## IPv6 Notes

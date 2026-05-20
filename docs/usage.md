@@ -24,6 +24,19 @@ For SSM:
 let config = SubscriptionConfig::ssm(group, source, port);
 ```
 
+IPv4 SSM groups must be in `232.0.0.0/8`; IPv6 SSM groups must be in
+`ff3x::/32`. Use ASM for groups outside those ranges.
+
+For IPv4 SSM on macOS, mcrx uses `IP_ADD_SOURCE_MEMBERSHIP` with an explicit
+local interface address. If tcpdump or Wireshark still shows IGMPv2 reports for
+a valid `232/8` SSM join, the macOS IGMP compatibility state may be stale. Stop
+older receiver processes and retry; if it persists, rebooting the Mac has been
+observed to restore the expected IGMPv3 reports:
+
+```text
+192.168.188.107 > 224.0.0.22: igmp v3 report, 1 group record(s) [gaddr 232.1.1.1 to_in { 192.46.235.159 }]
+```
+
 To join on a specific local interface:
 
 ```rust
