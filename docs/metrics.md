@@ -87,6 +87,14 @@ These are computed from delta counters divided by the sampled interval.
 The reusable single-header JSONL helper is also exported as
 `mcrx_core::jsonl` when the `metrics` feature is enabled.
 
+Writers take an exclusive advisory file lock. A second cooperative writer gets
+`WouldBlock` instead of racing another header or interleaving rows. The
+stateful `MetricsJsonlWriter` validates once and keeps the file open; the
+stateless append helper checks only the header on each call rather than
+rereading the complete history. Use `validate_existing_header()` when a full
+file integrity scan is required. Writer helpers reject incomplete canonical
+headers and sample rows that repeat header-only metadata fields.
+
 Configured via:
 
 - `MCRX_METRICS_SUMMARY_SECS`

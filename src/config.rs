@@ -201,8 +201,17 @@ pub(crate) fn validate_multicast_selection(
         return Err(McrxError::InvalidMulticastGroup);
     }
 
+    let group_is_ssm = match group {
+        IpAddr::V4(group) => is_ipv4_ssm_group(group),
+        IpAddr::V6(group) => is_ipv6_ssm_group(group),
+    };
+
+    if matches!(source, SourceFilter::Any) && group_is_ssm {
+        return Err(McrxError::SsmGroupRequiresSource);
+    }
+
     if let SourceFilter::Source(source) = source {
-        if source.is_multicast() {
+        if !is_valid_source_address(*source) {
             return Err(McrxError::InvalidSourceAddress);
         }
 
@@ -253,7 +262,16 @@ pub(crate) fn is_ipv4_ssm_group(group: Ipv4Addr) -> bool {
 
 pub(crate) fn is_ipv6_ssm_group(group: Ipv6Addr) -> bool {
     let octets = group.octets();
-    octets[0] == 0xff && (octets[1] >> 4) == 0x3
+    octets[0] == 0xff && (octets[1] >> 4) == 0x3 && octets[2] == 0 && octets[3] == 0
+}
+
+fn is_valid_source_address(source: IpAddr) -> bool {
+    match source {
+        IpAddr::V4(source) => {
+            !source.is_unspecified() && !source.is_multicast() && !source.is_broadcast()
+        }
+        IpAddr::V6(source) => !source.is_unspecified() && !source.is_multicast(),
+    }
 }
 
 #[cfg(test)]
@@ -348,7 +366,7 @@ mod tests {
 
     #[test]
     fn ipv6_asm_config_passes_validation() {
-        let cfg = SubscriptionConfig::asm_v6("ff3e::1234".parse().unwrap(), 5000);
+        let cfg = SubscriptionConfig::asm_v6("ff12::1234".parse().unwrap(), 5000);
 
         assert!(cfg.validate().is_ok());
         assert!(cfg.is_ipv6());
@@ -380,6 +398,61 @@ mod tests {
         let result = cfg.validate();
 
         assert!(matches!(result, Err(McrxError::InvalidIpv6SsmGroup)));
+    }
+
+    #[test]
+    fn asm_rejects_ipv4_ssm_range() {
+        let cfg = SubscriptionConfig::asm(Ipv4Addr::new(232, 1, 2, 3), 5000);
+
+        assert!(matches!(
+            cfg.validate(),
+            Err(McrxError::SsmGroupRequiresSource)
+        ));
+    }
+
+    #[test]
+    fn asm_rejects_ipv6_ssm_range() {
+        let cfg = SubscriptionConfig::asm_v6("ff3e::8000:1234".parse().unwrap(), 5000);
+
+        assert!(matches!(
+            cfg.validate(),
+            Err(McrxError::SsmGroupRequiresSource)
+        ));
+    }
+
+    #[test]
+    fn ipv6_ssm_requires_full_32_bit_prefix() {
+        let cfg = SubscriptionConfig::ssm_v6(
+            "ff3e:1::8000:1234".parse().unwrap(),
+            "2001:db8::10".parse().unwrap(),
+            5000,
+        );
+
+        assert!(matches!(
+            cfg.validate(),
+            Err(McrxError::InvalidIpv6SsmGroup)
+        ));
+    }
+
+    #[test]
+    fn unspecified_and_broadcast_sources_are_rejected() {
+        for source in [Ipv4Addr::UNSPECIFIED, Ipv4Addr::BROADCAST] {
+            let cfg = SubscriptionConfig::ssm(Ipv4Addr::new(232, 1, 2, 3), source, 5000);
+            assert!(matches!(
+                cfg.validate(),
+                Err(McrxError::InvalidSourceAddress)
+            ));
+        }
+
+        let cfg = SubscriptionConfig::ssm_v6(
+            "ff3e::8000:1234".parse().unwrap(),
+            Ipv6Addr::UNSPECIFIED,
+            5000,
+        );
+        assert!(matches!(
+            cfg.validate(),
+            Err(McrxError::InvalidSourceAddress)
+        ));
     }
 
     #[test]

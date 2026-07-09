@@ -94,7 +94,7 @@ Examples:
 
 ```bash
 cargo run --features raw-packets --bin mcrx_raw_recv -- 239.1.2.3 --interface 192.168.1.20
-cargo run --features raw-packets --bin mcrx_raw_recv -- ff3e::8000:1234 --interface 7
+cargo run --features raw-packets --bin mcrx_raw_recv -- ff1e::8000:1234 --interface 7
 ```
 
 Raw receive has platform-specific privilege and support boundaries. See

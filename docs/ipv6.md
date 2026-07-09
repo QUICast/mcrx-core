@@ -6,14 +6,18 @@ IPv6 multicast works best when group scope and interface selection are explicit.
 
 Use `ff3x::/32` groups for IPv6 SSM. The `x` nibble is the multicast scope:
 
-- `ff31::/16` for interface-local tests on one host
-- `ff32::/16` for link-local tests on one L2 link
-- `ff35::/16` for site-local tests
-- `ff38::/16` for organization-local tests
-- `ff3e::/16` for global scope
+- `ff31::/32` for interface-local tests on one host
+- `ff32::/32` for link-local tests on one L2 link
+- `ff35::/32` for site-local tests
+- `ff38::/32` for organization-local tests
+- `ff3e::/32` for global scope
 
 Prefer dynamic SSM group IDs such as `ff31::8000:1234` or
 `ff3e::8000:1234`.
+
+The `ff3x::/32` range is reserved for SSM and therefore requires a source
+filter. For ASM, use a non-SSM group such as `ff12::1234` (link-local) or
+`ff1e::8000:1234` (transient global scope).
 
 ## Source vs Interface
 
@@ -56,9 +60,9 @@ cargo run --bin mcrx_recv_meta -- ff3e::8000:1234 5000 <sender-ipv6> --interface
 
 ## Practical Rules
 
-- For `ff32::/16` link-local multicast, use a link-local `fe80::...` source on
+- For `ff32::/32` link-local multicast, use a link-local `fe80::...` source on
   the transmitting host.
-- For wider scopes such as `ff35::/16` or `ff3e::/16`, use a ULA or global
+- For wider scopes such as `ff35::/32` or `ff3e::/32`, use a ULA or global
   IPv6 source that is valid on that network.
 - The configured SSM `source` must match the actual packet source chosen by the
   sender.

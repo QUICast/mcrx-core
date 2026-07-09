@@ -2,6 +2,7 @@
 name = "mcrx-core"
 version = "0.2.7"
 edition = "2024"
+rust-version = "1.88"
 license = "BSD-2-Clause"
 description = "Runtime-agnostic and portable multicast receiver library for IPv4 and IPv6 ASM/SSM."
 readme = "README.md"
@@ -16,7 +17,7 @@ members = ["mcrx-core-ffi", "mcrx-core-py"]
 
 [features]
 default = []
-metrics = ["dep:serde_json"]
+metrics = ["dep:fs2", "dep:serde_json"]
 raw-packets = []
 tokio = ["dep:tokio"]
 
@@ -27,6 +28,10 @@ thiserror = "2.0.18"
 libc = "0.2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time", "signal"], optional = true }
 serde_json = { version = "1", optional = true }
+fs2 = { version = "0.4.3", optional = true }
+
+[package.metadata.docs.rs]
+all-features = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_System_IO"] }

@@ -146,8 +146,11 @@ impl Subscription {
     /// This is a low-level constructor. Callers are responsible for providing a
     /// socket that is compatible with the subscription configuration. For the
     /// checked convenience path, prefer `Context::add_subscription_with_socket()`.
+    /// The socket is switched to non-blocking mode and destination metadata is
+    /// enabled; a setup failure is returned by the first receive operation.
     pub fn new(id: SubscriptionId, config: SubscriptionConfig, socket: Socket) -> Self {
-        Self::with_socket(id, config, ReceiveSocket::adopt(socket))
+        let receive_socket = ReceiveSocket::adopt(socket, &config);
+        Self::with_socket(id, config, receive_socket)
     }
 
     pub(crate) fn from_receive_socket(
@@ -500,7 +503,21 @@ mod tests {
     }
 
     #[test]
-    fn try_recv_receives_packet_sent_to_bound_port() {
+    fn low_level_constructor_switches_socket_to_nonblocking() {
+        let config = sample_config_on_unused_port();
+        let socket = Socket::from(
+            UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, config.dst_port)).unwrap(),
+        );
+        let mut subscription = Subscription::new(SubscriptionId(1), config, socket);
+        subscription.mark_joined().unwrap();
+
+        let started = Instant::now();
+        assert!(subscription.try_recv().unwrap().is_none());
+        assert!(started.elapsed() < Duration::from_millis(100));
+    }
+
+    #[test]
+    fn try_recv_rejects_unicast_sent_to_the_bound_port() {
         let config = sample_config_on_unused_port();
         let socket = platform::open_bound_socket(&config).unwrap();
         let mut subscription =
@@ -518,14 +535,21 @@ mod tests {
             )
             .unwrap();
 
-        let deadline = Instant::now() + Duration::from_secs(1);
-        let packet = recv_next_subscription_packet(&subscription, deadline);
+        let deadline = Instant::now() + Duration::from_millis(200);
+        while Instant::now() < deadline {
+            assert!(subscription.try_recv().unwrap().is_none());
+            std::thread::sleep(Duration::from_millis(5));
+        }
 
-        assert_eq!(packet.subscription_id, SubscriptionId(1));
-        assert_eq!(packet.group, IpAddr::V4(ipv4_group(&config)));
-        assert_eq!(packet.dst_port, config.dst_port);
+        let multicast_sender = make_multicast_sender();
+        multicast_sender
+            .send_to(payload, ipv4_group_socket_addr(&config))
+            .unwrap();
+
+        let packet =
+            recv_next_subscription_packet(&subscription, Instant::now() + Duration::from_secs(1));
+        assert_eq!(packet.group, config.group);
         assert_eq!(&packet.payload[..], payload);
-        assert_eq!(packet.source.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
     }
 
     #[test]

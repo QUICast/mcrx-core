@@ -163,4 +163,19 @@ mod tests {
         let result = cfg.validate();
         assert!(matches!(result, Err(McrxError::InterfaceIndexRequiresIpv6)));
     }
+
+    #[test]
+    fn raw_asm_rejects_ssm_reserved_groups() {
+        let ipv4 = RawSubscriptionConfig::asm(Ipv4Addr::new(232, 1, 2, 3));
+        let ipv6 = RawSubscriptionConfig::asm_v6("ff3e::8000:1234".parse().unwrap());
+
+        assert!(matches!(
+            ipv4.validate(),
+            Err(McrxError::SsmGroupRequiresSource)
+        ));
+        assert!(matches!(
+            ipv6.validate(),
+            Err(McrxError::SsmGroupRequiresSource)
+        ));
+    }
 }

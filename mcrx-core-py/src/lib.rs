@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use mcrx_core::{
     Context, McrxError, Packet, PacketWithMetadata, ReceiveMetadata, SourceFilter,
     SubscriptionConfig, SubscriptionId, SubscriptionState,
@@ -159,12 +160,15 @@ fn mcrx_error_to_py(err: McrxError) -> PyErr {
     match err {
         McrxError::InvalidDestinationPort
         | McrxError::InvalidMulticastGroup
+        | McrxError::SsmGroupRequiresSource
         | McrxError::InvalidSourceAddress
+        | McrxError::InvalidIpv4SsmGroup
         | McrxError::InvalidIpv6SsmGroup
         | McrxError::SourceAddressFamilyMismatch
         | McrxError::InterfaceAddressFamilyMismatch
         | McrxError::InvalidInterfaceIndex
         | McrxError::InterfaceIndexRequiresIpv6
+        | McrxError::InvalidSubscriptionAddressFamily
         | McrxError::Ipv6SourceSpecificMulticastRequiresInterface => {
             PyValueError::new_err(err.to_string())
         }
@@ -526,7 +530,7 @@ struct PyPacket {
     source_port: u16,
     group: String,
     dst_port: u16,
-    payload: Vec<u8>,
+    payload: Bytes,
 }
 
 impl From<Packet> for PyPacket {
@@ -537,7 +541,7 @@ impl From<Packet> for PyPacket {
             source_port: packet.source.port(),
             group: packet.group.to_string(),
             dst_port: packet.dst_port,
-            payload: packet.payload.to_vec(),
+            payload: packet.payload,
         }
     }
 }

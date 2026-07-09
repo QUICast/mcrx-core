@@ -93,12 +93,12 @@ fn run() -> Result<(), String> {
 fn print_usage(program: &str) {
     eprintln!("usage: {program} <group> [source] [interface]");
     eprintln!("       {program} <group> [--source <source>] [--interface <interface>]");
-    eprintln!("  group      multicast group, e.g. 239.1.2.3 or ff3e::8000:1234");
+    eprintln!("  group      multicast group, e.g. 239.1.2.3 or ff1e::8000:1234");
     eprintln!("  source     optional source for SSM");
     eprintln!("  interface  optional local interface address or IPv6 interface index");
     eprintln!("examples:");
     eprintln!("  {program} 239.1.2.3 --interface 192.168.1.20");
-    eprintln!("  {program} ff3e::8000:1234 --interface 7");
+    eprintln!("  {program} ff1e::8000:1234 --interface 7");
     eprintln!("  {program} ff3e::8000:1234 2001:db8::10 --interface 2001:db8::20");
     eprintln!("notes:");
     eprintln!("  - for IPv4 SSM, use 232.0.0.0/8 groups such as 232.1.2.3");

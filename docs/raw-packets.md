@@ -80,7 +80,7 @@ The feature also includes a small receiver binary for platform testing:
 
 ```bash
 cargo run --features raw-packets --bin mcrx_raw_recv -- 239.1.2.3 --interface 192.168.1.20
-cargo run --features raw-packets --bin mcrx_raw_recv -- ff3e::8000:1234 --interface 7
+cargo run --features raw-packets --bin mcrx_raw_recv -- ff1e::8000:1234 --interface 7
 ```
 
 ## Raw Packet Shape
@@ -93,6 +93,10 @@ cargo run --features raw-packets --bin mcrx_raw_recv -- ff3e::8000:1234 --interf
 - parsed destination/group IP when cheaply available
 - parsed IP protocol or IPv6 next-header when cheaply available
 - `ReceiveMetadata`
+
+Captured padding is removed according to the IPv4 total-length or IPv6
+payload-length field, and truncated datagrams are discarded. IPv6 jumbograms
+are not supported by the bounded raw receive API.
 
 The raw path reuses the same `ReceiveMetadata` struct as the UDP metadata API.
 The most useful fields are:
@@ -118,9 +122,11 @@ the complete IP datagram rather than just the UDP payload.
 Practical notes:
 
 - raw packet sockets usually require `CAP_NET_RAW` or root
-- the packet socket is opened with `ETH_P_ALL` and filters in userspace, matching
-  tcpdump-style behavior for same-host outbound multicast paths where the packet
-  may only be visible as `PACKET_OUTGOING`
+- the packet socket is opened with `ETH_P_ALL`, matching tcpdump-style behavior
+  for same-host outbound multicast paths where the packet may only be visible
+  as `PACKET_OUTGOING`
+- an attached classic BPF program filters the configured IP family, destination
+  group, and optional source in the kernel; parsing verifies them again
 - multicast join and leave still reuse the normal multicast membership logic
 - interface selection matters, especially for IPv6 and link-local groups
 
@@ -146,6 +152,10 @@ Practical notes:
 - raw receive requires an explicit interface address or interface index
 - common BPF datalink types are supported: raw IP, loopback/null, Ethernet,
   and VLAN-tagged Ethernet
+- BPF capture blocks are retained across receive calls so every matching record
+  in a kernel batch can be returned
+- an attached BPF program filters raw/null and ordinary Ethernet traffic in the
+  kernel; VLAN traffic is conservatively verified in userspace
 - unsupported BPF datalink types return
   `McrxError::RawPacketReceiveUnsupported(...)`
 
@@ -159,9 +169,12 @@ Practical notes:
 - IPv4 raw receive requires an explicit local IPv4 interface address
 - the implementation first tries Windows multicast-only capture and falls back
   to ordinary raw capture if needed
-- Windows also opens an IPv4/UDP raw receive socket as a pragmatic fallback for
+- Windows also opens an IPv4/UDP raw receive socket as a required fallback for
   adapters that expose multicast control traffic through raw capture but do not
   surface UDP multicast data there
+- setup and membership failures on either capture path are reported rather than
+  silently degrading; UDP is emitted only through the fallback path to avoid
+  duplicate delivery
 - IPv6 raw receive currently returns
   `McrxError::RawPacketReceiveUnsupported(...)`
 
@@ -179,6 +192,8 @@ The raw config path reuses the same multicast validation model as the UDP API:
 - IPv6 interface indexes are supported, IPv4 interface indexes are rejected
 - IPv4 SSM requires `232.0.0.0/8`
 - IPv6 SSM requires `ff3x::/32`
+- SSM-reserved ranges require a source; source-less ASM joins to those ranges
+  are rejected
 
 ## IPv6 Notes
 

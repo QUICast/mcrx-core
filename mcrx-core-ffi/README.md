@@ -13,6 +13,13 @@ The C surface is deliberately small and stable-looking:
 
 Raw packet receive is not exposed in the first FFI pass. Keep using the Rust
 `raw-packets` API directly until the C shape for complete IP datagrams is clear.
+The FFI crate therefore does not forward the core crate's `raw-packets`,
+`tokio`, or `metrics` features.
+
+The background worker can be stopped promptly even when configured with a long
+idle interval. Calling stop or stop-then-start from inside a packet callback is
+supported; generation tags ensure the replaced worker exits after that callback
+without consuming packets or stopping its replacement.
 
 ## Header
 

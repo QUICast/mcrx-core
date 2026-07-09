@@ -5,8 +5,8 @@ use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::os::raw::{c_char, c_int, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -50,8 +50,11 @@ pub struct McrxPacketView {
 struct ContextState {
     context: Mutex<Context>,
     last_error: Mutex<Option<CString>>,
-    running: AtomicBool,
+    active_worker_generation: AtomicU64,
+    next_worker_generation: AtomicU64,
     worker: Mutex<Option<JoinHandle<()>>>,
+    idle_wait: Mutex<()>,
+    wake_worker: Condvar,
 }
 
 #[repr(C)]
@@ -65,8 +68,11 @@ impl McrxContext {
             state: Arc::new(ContextState {
                 context: Mutex::new(Context::new()),
                 last_error: Mutex::new(None),
-                running: AtomicBool::new(false),
+                active_worker_generation: AtomicU64::new(0),
+                next_worker_generation: AtomicU64::new(1),
                 worker: Mutex::new(None),
+                idle_wait: Mutex::new(()),
+                wake_worker: Condvar::new(),
             }),
         }
     }
@@ -92,7 +98,10 @@ impl McrxContext {
     }
 
     fn stop_worker(&self) -> Result<(), String> {
-        self.state.running.store(false, Ordering::Release);
+        self.state
+            .active_worker_generation
+            .store(0, Ordering::Release);
+        self.state.wake_worker.notify_all();
 
         let mut worker = self
             .state
@@ -104,13 +113,53 @@ impl McrxContext {
             return Ok(());
         };
 
+        drop(worker);
+
         if handle.thread().id() == thread::current().id() {
+            // Detach the current handle. Its generation was invalidated above,
+            // so it must exit after the callback even if a replacement starts.
             return Ok(());
         }
 
         handle
             .join()
             .map_err(|_| "mcrx receive worker panicked".to_string())
+    }
+}
+
+fn wait_for_worker_wakeup(
+    state: &ContextState,
+    generation: u64,
+    timeout: Duration,
+) -> Result<(), String> {
+    let guard = state
+        .idle_wait
+        .lock()
+        .map_err(|_| "mcrx worker wait mutex is poisoned".to_string())?;
+
+    if state.active_worker_generation.load(Ordering::Acquire) != generation {
+        return Ok(());
+    }
+
+    let (_guard, _timeout) = state
+        .wake_worker
+        .wait_timeout_while(guard, timeout, |_| {
+            state.active_worker_generation.load(Ordering::Acquire) == generation
+        })
+        .map_err(|_| "mcrx worker wait mutex is poisoned".to_string())?;
+    Ok(())
+}
+
+fn stop_worker_generation_with_error(state: &ContextState, generation: u64, error: String) {
+    if state
+        .active_worker_generation
+        .compare_exchange(generation, 0, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        if let Ok(mut last_error) = state.last_error.lock() {
+            *last_error = Some(cstring_lossy(error));
+        }
+        state.wake_worker.notify_all();
     }
 }
 
@@ -386,21 +435,24 @@ fn packet_view(
 
 fn worker_loop(
     state: Arc<ContextState>,
+    generation: u64,
     callback: McrxPacketCallback,
     user_data: usize,
     idle_sleep: Duration,
 ) {
-    while state.running.load(Ordering::Acquire) {
+    while state.active_worker_generation.load(Ordering::Acquire) == generation {
         match receive_one(&state) {
             Ok(Some(packet)) => {
                 call_packet_callback(&packet, callback, user_data as *mut c_void);
             }
-            Ok(None) => thread::sleep(idle_sleep),
-            Err(err) => {
-                if let Ok(mut last_error) = state.last_error.lock() {
-                    *last_error = Some(cstring_lossy(err));
+            Ok(None) => {
+                if let Err(err) = wait_for_worker_wakeup(&state, generation, idle_sleep) {
+                    stop_worker_generation_with_error(&state, generation, err);
+                    break;
                 }
-                state.running.store(false, Ordering::Release);
+            }
+            Err(err) => {
+                stop_worker_generation_with_error(&state, generation, err);
                 break;
             }
         }
@@ -687,7 +739,12 @@ pub unsafe extern "C" fn mcrx_context_poll(
         }
 
         let Some(callback) = callback else {
-            return context.set_invalid_argument("callback must not be null");
+            if max_packets == 0 {
+                context.clear_error();
+                return MCRX_STATUS_OK;
+            }
+            return context
+                .set_invalid_argument("callback must not be null when max_packets is non-zero");
         };
 
         let mut received = 0usize;
@@ -752,7 +809,17 @@ pub unsafe extern "C" fn mcrx_context_start(
             }
         }
 
-        context.state.running.store(true, Ordering::Release);
+        let generation = context
+            .state
+            .next_worker_generation
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.wrapping_add(1).max(1))
+            })
+            .expect("worker generation update always succeeds");
+        context
+            .state
+            .active_worker_generation
+            .store(generation, Ordering::Release);
 
         let state = Arc::clone(&context.state);
         let user_data = user_data as usize;
@@ -763,7 +830,13 @@ pub unsafe extern "C" fn mcrx_context_start(
         };
 
         *worker = Some(thread::spawn(move || {
-            worker_loop(state, callback, user_data, Duration::from_millis(sleep_ms));
+            worker_loop(
+                state,
+                generation,
+                callback,
+                user_data,
+                Duration::from_millis(sleep_ms),
+            );
         }));
 
         context.clear_error();
@@ -798,7 +871,7 @@ pub unsafe extern "C" fn mcrx_context_stop(context: *mut McrxContext) -> c_int {
 mod tests {
     use super::*;
     use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
     use std::time::Instant;
 
     fn cstring(value: &str) -> CString {
@@ -817,6 +890,31 @@ mod tests {
         assert!(!packet.is_null());
         let counter = unsafe { &*(user_data.cast::<AtomicUsize>()) };
         counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    struct RestartCallbackState {
+        context: usize,
+        calls: AtomicUsize,
+        stop_status: AtomicI32,
+        start_status: AtomicI32,
+    }
+
+    unsafe extern "C" fn restart_from_callback(
+        packet: *const McrxPacketView,
+        user_data: *mut c_void,
+    ) {
+        assert!(!packet.is_null());
+        let state = unsafe { &*(user_data.cast::<RestartCallbackState>()) };
+        if state.calls.fetch_add(1, Ordering::AcqRel) == 0 {
+            let context = state.context as *mut McrxContext;
+            state
+                .stop_status
+                .store(unsafe { mcrx_context_stop(context) }, Ordering::Release);
+            state.start_status.store(
+                unsafe { mcrx_context_start(context, Some(restart_from_callback), user_data, 1) },
+                Ordering::Release,
+            );
+        }
     }
 
     #[test]
@@ -843,9 +941,12 @@ mod tests {
         let join_status = unsafe { mcrx_context_join_subscription(context, subscription_id) };
         assert_eq!(join_status, MCRX_STATUS_OK);
 
-        let sender = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let sender = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)).unwrap();
         sender
-            .send_to(b"ffi packet", SocketAddrV4::new(Ipv4Addr::LOCALHOST, port))
+            .send_to(
+                b"ffi packet",
+                SocketAddrV4::new(Ipv4Addr::new(239, 1, 2, 3), port),
+            )
             .unwrap();
 
         let counter = AtomicUsize::new(0);
@@ -873,6 +974,19 @@ mod tests {
         unsafe {
             mcrx_context_free(context);
         }
+    }
+
+    #[test]
+    fn zero_packet_poll_does_not_require_a_callback() {
+        let context = mcrx_context_new();
+        assert!(!context.is_null());
+
+        let mut received = usize::MAX;
+        let status = unsafe { mcrx_context_poll(context, 0, None, ptr::null_mut(), &mut received) };
+
+        assert_eq!(status, MCRX_STATUS_OK);
+        assert_eq!(received, 0);
+        unsafe { mcrx_context_free(context) };
     }
 
     #[test]
@@ -904,7 +1018,7 @@ mod tests {
 
     #[test]
     fn parses_ipv6_interface_index() {
-        let config = build_subscription_config("ff3e::8000:1234", 5000, None, Some("7")).unwrap();
+        let config = build_subscription_config("ff1e::8000:1234", 5000, None, Some("7")).unwrap();
 
         assert_eq!(config.interface, None);
         assert_eq!(config.interface_index, Some(7));
@@ -913,9 +1027,92 @@ mod tests {
     #[test]
     fn parses_scoped_ipv6_interface() {
         let config =
-            build_subscription_config("ff32::8000:1234", 5000, None, Some("fe80::1%7")).unwrap();
+            build_subscription_config("ff12::8000:1234", 5000, None, Some("fe80::1%7")).unwrap();
 
         assert_eq!(config.interface, Some("fe80::1".parse().unwrap()));
         assert_eq!(config.interface_index, Some(7));
+    }
+
+    #[test]
+    fn stopping_worker_interrupts_long_idle_wait() {
+        let context = mcrx_context_new();
+        assert!(!context.is_null());
+
+        let status =
+            unsafe { mcrx_context_start(context, Some(count_packet), ptr::null_mut(), 60_000) };
+        assert_eq!(status, MCRX_STATUS_OK);
+        thread::sleep(Duration::from_millis(20));
+
+        let started = Instant::now();
+        assert_eq!(unsafe { mcrx_context_stop(context) }, MCRX_STATUS_OK);
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        unsafe { mcrx_context_free(context) };
+    }
+
+    #[test]
+    fn callback_can_stop_and_restart_worker_without_overlap() {
+        let context = mcrx_context_new();
+        assert!(!context.is_null());
+        let group_addr = Ipv4Addr::new(239, 1, 2, 6);
+        let group = cstring(&group_addr.to_string());
+        let port = unused_udp_port_v4();
+        let mut subscription_id = 0u64;
+        assert_eq!(
+            unsafe {
+                mcrx_context_add_subscription(
+                    context,
+                    group.as_ptr(),
+                    port,
+                    ptr::null(),
+                    ptr::null(),
+                    &mut subscription_id,
+                )
+            },
+            MCRX_STATUS_OK
+        );
+        assert_eq!(
+            unsafe { mcrx_context_join_subscription(context, subscription_id) },
+            MCRX_STATUS_OK
+        );
+
+        let state = RestartCallbackState {
+            context: context as usize,
+            calls: AtomicUsize::new(0),
+            stop_status: AtomicI32::new(-1),
+            start_status: AtomicI32::new(-1),
+        };
+        assert_eq!(
+            unsafe {
+                mcrx_context_start(
+                    context,
+                    Some(restart_from_callback),
+                    (&state as *const RestartCallbackState).cast_mut().cast(),
+                    1,
+                )
+            },
+            MCRX_STATUS_OK
+        );
+
+        let sender = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+        let destination = SocketAddrV4::new(group_addr, port);
+        sender.send_to(b"restart-1", destination).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while state.start_status.load(Ordering::Acquire) == -1 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(state.stop_status.load(Ordering::Acquire), MCRX_STATUS_OK);
+        assert_eq!(state.start_status.load(Ordering::Acquire), MCRX_STATUS_OK);
+
+        sender.send_to(b"restart-2", destination).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while state.calls.load(Ordering::Acquire) < 2 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(state.calls.load(Ordering::Acquire), 2);
+
+        assert_eq!(unsafe { mcrx_context_stop(context) }, MCRX_STATUS_OK);
+        unsafe { mcrx_context_free(context) };
     }
 }

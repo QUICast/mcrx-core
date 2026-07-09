@@ -31,13 +31,21 @@ struct ContextMetricsInner {
 }
 
 /// Owns and manages the set of active subscriptions.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Context {
     subscriptions: Vec<Subscription>,
     next_subscription_id: u64,
     next_recv_index: usize,
     #[cfg(feature = "metrics")]
     metrics: ContextMetricsInner,
+}
+
+const MAX_DRAIN_PACKETS_PER_CALL: usize = 4096;
+
+impl Default for Context {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Context {
@@ -470,23 +478,22 @@ impl Context {
         Ok(received)
     }
 
-    /// Attempts to receive all currently available packets without blocking.
+    /// Attempts to receive currently available packets without blocking.
     ///
-    /// This is a convenience wrapper around `try_recv_batch_into` that continues
-    /// draining until no more packets are available.
+    /// This is a convenience wrapper around `try_recv_batch_into` that drains at
+    /// most 4096 packets per call. The limit prevents a continuously busy socket
+    /// from monopolizing the caller or growing `out` without bound. Callers that
+    /// need a different budget should use `try_recv_batch_into` directly.
     ///
-    /// Note: this only drains packets that are currently available without blocking.
-    /// It may result in unbounded growth of `out` if a large number of packets are queued,
-    /// so callers should ensure capacity if needed.
     pub fn try_recv_all_into(&mut self, out: &mut Vec<Packet>) -> Result<usize, McrxError> {
         #[cfg(feature = "metrics")]
         self.record_batch_call();
 
-        self.try_recv_batch_into_impl(out, usize::MAX)
+        self.try_recv_batch_into_impl(out, MAX_DRAIN_PACKETS_PER_CALL)
     }
 
-    /// Attempts to receive all currently available packets with richer receive
-    /// metadata without blocking.
+    /// Attempts to receive up to 4096 currently available packets with richer
+    /// receive metadata without blocking.
     pub fn try_recv_all_with_metadata_into(
         &mut self,
         out: &mut Vec<PacketWithMetadata>,
@@ -494,7 +501,7 @@ impl Context {
         #[cfg(feature = "metrics")]
         self.record_batch_call();
 
-        self.try_recv_batch_with_metadata_into_impl(out, usize::MAX)
+        self.try_recv_batch_with_metadata_into_impl(out, MAX_DRAIN_PACKETS_PER_CALL)
     }
 }
 
@@ -595,6 +602,12 @@ mod tests {
 
         assert_eq!(context.subscription_count(), 0);
         assert!(context.subscriptions().is_empty());
+    }
+
+    #[test]
+    fn default_uses_the_same_id_sequence_as_new() {
+        let context = Context::default();
+        assert_eq!(context.next_subscription_id, 1);
     }
 
     #[test]

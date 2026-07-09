@@ -35,16 +35,61 @@ pub(crate) struct RawReceiveSocket {
     receive_socket: Socket,
     membership_socket: Option<Socket>,
     #[cfg(windows)]
-    windows_udp_receive_socket: Option<Socket>,
+    windows_udp_receive_socket: Socket,
     #[cfg(target_os = "macos")]
-    apple_bpf_buffer_len: usize,
-    #[cfg(target_os = "macos")]
-    apple_bpf_buffer: Mutex<Vec<u8>>,
+    apple_bpf_state: Mutex<AppleBpfState>,
     #[cfg(target_os = "macos")]
     apple_bpf_datalink: u32,
     #[cfg(target_os = "macos")]
     apple_interface_index: Option<u32>,
 }
+
+#[cfg(target_os = "macos")]
+struct AppleBpfState {
+    buffer: Vec<u8>,
+    filled_len: usize,
+    next_offset: usize,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ClassicBpfInstruction {
+    code: u16,
+    jt: u8,
+    jf: u8,
+    k: u32,
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct AppleBpfProgram {
+    len: u32,
+    instructions: *mut ClassicBpfInstruction,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const BPF_LD: u16 = 0x00;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const BPF_W: u16 = 0x00;
+#[cfg(target_os = "macos")]
+const BPF_H: u16 = 0x08;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const BPF_B: u16 = 0x10;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const BPF_ABS: u16 = 0x20;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const BPF_ALU: u16 = 0x04;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const BPF_AND: u16 = 0x50;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const BPF_JMP: u16 = 0x05;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const BPF_JEQ: u16 = 0x10;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const BPF_K: u16 = 0x00;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const BPF_RET: u16 = 0x06;
 
 impl std::fmt::Debug for RawReceiveSocket {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -64,10 +109,13 @@ struct ParsedIpDatagram {
     source_ip: IpAddr,
     destination_ip: IpAddr,
     protocol: u8,
+    datagram_len: usize,
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 const MAX_RAW_FILTERED_READS_PER_RECV: usize = 256;
+#[cfg(any(target_os = "linux", windows))]
+const MAX_IP_DATAGRAM_SIZE: usize = 40 + u16::MAX as usize;
 
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 fn raw_filter_budget_exhausted(filtered_reads: &mut usize) -> bool {
@@ -75,6 +123,84 @@ fn raw_filter_budget_exhausted(filtered_reads: &mut usize) -> bool {
     // non-blocking receive call bounded even when the interface is noisy.
     *filtered_reads += 1;
     *filtered_reads >= MAX_RAW_FILTERED_READS_PER_RECV
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn bpf_statement(code: u16, value: u32) -> ClassicBpfInstruction {
+    ClassicBpfInstruction {
+        code,
+        jt: 0,
+        jf: 0,
+        k: value,
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn bpf_ip_filter(config: &RawSubscriptionConfig, ip_offset: u32) -> Vec<ClassicBpfInstruction> {
+    fn add_comparison(
+        instructions: &mut Vec<ClassicBpfInstruction>,
+        rejects: &mut Vec<usize>,
+        offset: u32,
+        expected: u32,
+    ) {
+        instructions.push(bpf_statement(BPF_LD | BPF_W | BPF_ABS, offset));
+        rejects.push(instructions.len());
+        instructions.push(bpf_statement(BPF_JMP | BPF_JEQ | BPF_K, expected));
+    }
+
+    let mut instructions = vec![
+        bpf_statement(BPF_LD | BPF_B | BPF_ABS, ip_offset),
+        bpf_statement(BPF_ALU | BPF_AND | BPF_K, 0xf0),
+    ];
+    let mut rejects = vec![instructions.len()];
+    instructions.push(bpf_statement(
+        BPF_JMP | BPF_JEQ | BPF_K,
+        if config.is_ipv4() { 0x40 } else { 0x60 },
+    ));
+
+    let (source_offset, destination_offset) = if config.is_ipv4() {
+        (ip_offset + 12, ip_offset + 16)
+    } else {
+        (ip_offset + 8, ip_offset + 24)
+    };
+    let destination = match config.group {
+        IpAddr::V4(address) => address.octets().to_vec(),
+        IpAddr::V6(address) => address.octets().to_vec(),
+    };
+
+    for (word, bytes) in destination.chunks_exact(4).enumerate() {
+        add_comparison(
+            &mut instructions,
+            &mut rejects,
+            destination_offset + word as u32 * 4,
+            u32::from_be_bytes(bytes.try_into().expect("four-byte address word")),
+        );
+    }
+
+    if let crate::SourceFilter::Source(source) = config.source {
+        let source = match source {
+            IpAddr::V4(address) => address.octets().to_vec(),
+            IpAddr::V6(address) => address.octets().to_vec(),
+        };
+        for (word, bytes) in source.chunks_exact(4).enumerate() {
+            add_comparison(
+                &mut instructions,
+                &mut rejects,
+                source_offset + word as u32 * 4,
+                u32::from_be_bytes(bytes.try_into().expect("four-byte address word")),
+            );
+        }
+    }
+
+    instructions.push(bpf_statement(BPF_RET | BPF_K, u32::MAX));
+    let reject_index = instructions.len();
+    instructions.push(bpf_statement(BPF_RET | BPF_K, 0));
+
+    for comparison_index in rejects {
+        instructions[comparison_index].jf = (reject_index - comparison_index - 1) as u8;
+    }
+
+    instructions
 }
 
 #[cfg(target_os = "linux")]
@@ -105,14 +231,17 @@ pub(crate) fn open_raw_socket(
         )
     })?;
 
-    let bpf_socket = open_apple_bpf_socket(interface_index)?;
+    let bpf_socket = open_apple_bpf_socket(interface_index, config)?;
     let membership_socket = open_membership_socket(config.family())?;
 
     Ok(RawReceiveSocket {
         receive_socket: bpf_socket.socket,
         membership_socket: Some(membership_socket),
-        apple_bpf_buffer_len: bpf_socket.buffer_len,
-        apple_bpf_buffer: Mutex::new(vec![0u8; bpf_socket.buffer_len]),
+        apple_bpf_state: Mutex::new(AppleBpfState {
+            buffer: vec![0u8; bpf_socket.buffer_len],
+            filled_len: 0,
+            next_offset: 0,
+        }),
         apple_bpf_datalink: bpf_socket.datalink,
         apple_interface_index: Some(interface_index),
     })
@@ -141,7 +270,7 @@ pub(crate) fn open_raw_socket(
     };
 
     let raw_socket = open_windows_raw_socket(interface)?;
-    let udp_raw_socket = open_windows_udp_raw_socket(interface).ok();
+    let udp_raw_socket = open_windows_udp_raw_socket(interface)?;
     let membership_socket = open_membership_socket(config.family())?;
 
     Ok(RawReceiveSocket {
@@ -174,7 +303,10 @@ pub(crate) fn join_raw_multicast_group(
     super::join_multicast_group(membership_socket, &compat_config)?;
 
     #[cfg(windows)]
-    join_windows_raw_receive_sockets(socket, &compat_config);
+    if let Err(err) = join_windows_raw_receive_sockets(socket, &compat_config) {
+        let _ = super::leave_multicast_group(membership_socket, &compat_config);
+        return Err(err);
+    }
 
     Ok(())
 }
@@ -193,7 +325,7 @@ pub(crate) fn leave_raw_multicast_group(
     super::leave_multicast_group(membership_socket, &compat_config)?;
 
     #[cfg(windows)]
-    leave_windows_raw_receive_sockets(socket, &compat_config);
+    leave_windows_raw_receive_sockets(socket, &compat_config)?;
 
     Ok(())
 }
@@ -204,7 +336,7 @@ pub(crate) fn recv_raw_packet(
     subscription_id: SubscriptionId,
     config: &RawSubscriptionConfig,
 ) -> Result<Option<RawPacket>, McrxError> {
-    let mut buf = [std::mem::MaybeUninit::<u8>::uninit(); 65535];
+    let mut buf = [std::mem::MaybeUninit::<u8>::uninit(); MAX_IP_DATAGRAM_SIZE];
     let mut filtered_reads = 0usize;
 
     loop {
@@ -274,16 +406,41 @@ pub(crate) fn recv_raw_packet(
     let mut filtered_reads = 0usize;
 
     loop {
-        let mut buf = socket.apple_bpf_buffer.lock().map_err(|_| {
+        let mut state = socket.apple_bpf_state.lock().map_err(|_| {
             McrxError::ReceiveFailed(std::io::Error::other("macOS BPF buffer mutex is poisoned"))
         })?;
-        debug_assert_eq!(buf.len(), socket.apple_bpf_buffer_len);
+
+        if state.next_offset < state.filled_len {
+            let start_offset = state.next_offset;
+            let (packet, next_offset) = next_matching_apple_bpf_packet(
+                &state.buffer[..state.filled_len],
+                start_offset,
+                socket.apple_bpf_datalink,
+                socket.apple_interface_index,
+                subscription_id,
+                config,
+            )?;
+            state.next_offset = next_offset;
+
+            if let Some(packet) = packet {
+                return Ok(Some(packet));
+            }
+
+            state.filled_len = 0;
+            state.next_offset = 0;
+            drop(state);
+
+            if raw_filter_budget_exhausted(&mut filtered_reads) {
+                return Ok(None);
+            }
+            continue;
+        }
 
         let len = unsafe {
             libc::read(
                 socket.socket().as_raw_fd(),
-                buf.as_mut_ptr().cast(),
-                buf.len(),
+                state.buffer.as_mut_ptr().cast(),
+                state.buffer.len(),
             )
         };
 
@@ -295,22 +452,8 @@ pub(crate) fn recv_raw_packet(
             return Err(McrxError::ReceiveFailed(err));
         }
 
-        let packet_block = &buf[..len as usize];
-        let Some(packet) = first_matching_apple_bpf_packet(
-            packet_block,
-            socket.apple_bpf_datalink,
-            socket.apple_interface_index,
-            subscription_id,
-            config,
-        )?
-        else {
-            if raw_filter_budget_exhausted(&mut filtered_reads) {
-                return Ok(None);
-            }
-            continue;
-        };
-
-        return Ok(Some(packet));
+        state.filled_len = len as usize;
+        state.next_offset = 0;
     }
 }
 
@@ -320,17 +463,21 @@ pub(crate) fn recv_raw_packet(
     subscription_id: SubscriptionId,
     config: &RawSubscriptionConfig,
 ) -> Result<Option<RawPacket>, McrxError> {
-    if let Some(packet) =
-        recv_raw_packet_from_windows_socket(&socket.receive_socket, subscription_id, config)?
-    {
+    if let Some(packet) = recv_raw_packet_from_windows_socket(
+        &socket.receive_socket,
+        subscription_id,
+        config,
+        Some(IPPROTO_UDP as u8),
+    )? {
         return Ok(Some(packet));
     }
 
-    if let Some(udp_socket) = &socket.windows_udp_receive_socket {
-        return recv_raw_packet_from_windows_socket(udp_socket, subscription_id, config);
-    }
-
-    Ok(None)
+    recv_raw_packet_from_windows_socket(
+        &socket.windows_udp_receive_socket,
+        subscription_id,
+        config,
+        None,
+    )
 }
 
 #[cfg(windows)]
@@ -338,8 +485,9 @@ fn recv_raw_packet_from_windows_socket(
     receive_socket: &Socket,
     subscription_id: SubscriptionId,
     config: &RawSubscriptionConfig,
+    excluded_protocol: Option<u8>,
 ) -> Result<Option<RawPacket>, McrxError> {
-    let mut buf = [std::mem::MaybeUninit::<u8>::uninit(); 65535];
+    let mut buf = [std::mem::MaybeUninit::<u8>::uninit(); MAX_IP_DATAGRAM_SIZE];
     let mut filtered_reads = 0usize;
 
     loop {
@@ -370,6 +518,13 @@ fn recv_raw_packet_from_windows_socket(
             }
             continue;
         };
+
+        if excluded_protocol == Some(parsed.protocol) {
+            if raw_filter_budget_exhausted(&mut filtered_reads) {
+                return Ok(None);
+            }
+            continue;
+        }
 
         if !packet_matches_config(parsed, config) {
             if raw_filter_budget_exhausted(&mut filtered_reads) {
@@ -421,6 +576,7 @@ fn open_linux_packet_socket(config: &RawSubscriptionConfig) -> Result<Socket, Mc
     }
 
     let socket = unsafe { Socket::from_raw_fd(raw_fd) };
+    attach_linux_subscription_filter(&socket, config)?;
     let interface_index = resolve_linux_packet_interface_index(config)?;
 
     let bind_addr = libc::sockaddr_ll {
@@ -455,6 +611,43 @@ fn linux_packet_socket_protocol() -> u16 {
     (libc::ETH_P_ALL as u16).to_be()
 }
 
+#[cfg(target_os = "linux")]
+fn attach_linux_subscription_filter(
+    socket: &Socket,
+    config: &RawSubscriptionConfig,
+) -> Result<(), McrxError> {
+    const _: () = assert!(
+        std::mem::size_of::<ClassicBpfInstruction>() == std::mem::size_of::<libc::sock_filter>()
+    );
+    const _: () = assert!(
+        std::mem::align_of::<ClassicBpfInstruction>() == std::mem::align_of::<libc::sock_filter>()
+    );
+
+    let mut instructions = bpf_ip_filter(config, 0);
+    let program = libc::sock_fprog {
+        len: instructions.len() as u16,
+        filter: instructions.as_mut_ptr().cast::<libc::sock_filter>(),
+    };
+
+    let result = unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_ATTACH_FILTER,
+            (&program as *const libc::sock_fprog).cast(),
+            std::mem::size_of_val(&program) as libc::socklen_t,
+        )
+    };
+
+    if result == -1 {
+        Err(McrxError::SocketOptionFailed(
+            std::io::Error::last_os_error(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(target_os = "macos")]
 struct AppleBpfSocket {
     socket: Socket,
@@ -463,7 +656,10 @@ struct AppleBpfSocket {
 }
 
 #[cfg(target_os = "macos")]
-fn open_apple_bpf_socket(interface_index: u32) -> Result<AppleBpfSocket, McrxError> {
+fn open_apple_bpf_socket(
+    interface_index: u32,
+    config: &RawSubscriptionConfig,
+) -> Result<AppleBpfSocket, McrxError> {
     let interface_name = interface_name_from_index(interface_index)?;
     let socket = open_available_bpf_device()?;
 
@@ -474,12 +670,91 @@ fn open_apple_bpf_socket(interface_index: u32) -> Result<AppleBpfSocket, McrxErr
 
     let buffer_len = get_bpf_u32(&socket, libc::BIOCGBLEN)? as usize;
     let datalink = get_bpf_u32(&socket, libc::BIOCGDLT)?;
+    attach_apple_subscription_filter(&socket, datalink, config)?;
 
     Ok(AppleBpfSocket {
         socket,
         buffer_len,
         datalink,
     })
+}
+
+#[cfg(target_os = "macos")]
+fn attach_apple_subscription_filter(
+    socket: &Socket,
+    datalink: u32,
+    config: &RawSubscriptionConfig,
+) -> Result<(), McrxError> {
+    let mut instructions = apple_subscription_filter(datalink, config)?;
+    let mut program = AppleBpfProgram {
+        len: instructions.len() as u32,
+        instructions: instructions.as_mut_ptr(),
+    };
+    let result = unsafe {
+        libc::ioctl(
+            socket.as_raw_fd(),
+            libc::BIOCSETF,
+            (&mut program as *mut AppleBpfProgram).cast::<libc::c_void>(),
+        )
+    };
+
+    if result == -1 {
+        Err(McrxError::SocketOptionFailed(
+            std::io::Error::last_os_error(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn apple_subscription_filter(
+    datalink: u32,
+    config: &RawSubscriptionConfig,
+) -> Result<Vec<ClassicBpfInstruction>, McrxError> {
+    match datalink {
+        libc::DLT_RAW => Ok(bpf_ip_filter(config, 0)),
+        libc::DLT_NULL | libc::DLT_LOOP => Ok(bpf_ip_filter(config, 4)),
+        libc::DLT_EN10MB => {
+            let expected_ethertype = if config.is_ipv4() { 0x0800 } else { 0x86dd };
+            let mut instructions = vec![
+                bpf_statement(BPF_LD | BPF_H | BPF_ABS, 12),
+                ClassicBpfInstruction {
+                    code: BPF_JMP | BPF_JEQ | BPF_K,
+                    jt: 7,
+                    jf: 0,
+                    k: expected_ethertype,
+                },
+                ClassicBpfInstruction {
+                    code: BPF_JMP | BPF_JEQ | BPF_K,
+                    jt: 0,
+                    jf: 1,
+                    k: 0x8100,
+                },
+                bpf_statement(BPF_RET | BPF_K, u32::MAX),
+                ClassicBpfInstruction {
+                    code: BPF_JMP | BPF_JEQ | BPF_K,
+                    jt: 0,
+                    jf: 1,
+                    k: 0x88a8,
+                },
+                bpf_statement(BPF_RET | BPF_K, u32::MAX),
+                ClassicBpfInstruction {
+                    code: BPF_JMP | BPF_JEQ | BPF_K,
+                    jt: 0,
+                    jf: 1,
+                    k: 0x9100,
+                },
+                bpf_statement(BPF_RET | BPF_K, u32::MAX),
+                bpf_statement(BPF_RET | BPF_K, 0),
+            ];
+            instructions.extend(bpf_ip_filter(config, 14));
+            Ok(instructions)
+        }
+        other => Err(McrxError::RawPacketReceiveUnsupported(format!(
+            "macOS BPF datalink type {other} is not supported yet"
+        ))),
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -656,31 +931,37 @@ fn open_windows_udp_raw_socket(interface: Ipv4Addr) -> Result<Socket, McrxError>
 }
 
 #[cfg(windows)]
-fn join_windows_raw_receive_sockets(socket: &RawReceiveSocket, config: &crate::SubscriptionConfig) {
+fn join_windows_raw_receive_sockets(
+    socket: &RawReceiveSocket,
+    config: &crate::SubscriptionConfig,
+) -> Result<(), McrxError> {
     if !matches!(config.family(), SubscriptionAddressFamily::Ipv4) {
-        return;
+        return Ok(());
     }
 
-    let _ = super::join_multicast_group(&socket.receive_socket, config);
-
-    if let Some(udp_socket) = &socket.windows_udp_receive_socket {
-        let _ = super::join_multicast_group(udp_socket, config);
+    super::join_multicast_group(&socket.receive_socket, config)?;
+    if let Err(err) = super::join_multicast_group(&socket.windows_udp_receive_socket, config) {
+        let _ = super::leave_multicast_group(&socket.receive_socket, config);
+        return Err(err);
     }
+
+    Ok(())
 }
 
 #[cfg(windows)]
 fn leave_windows_raw_receive_sockets(
     socket: &RawReceiveSocket,
     config: &crate::SubscriptionConfig,
-) {
+) -> Result<(), McrxError> {
     if !matches!(config.family(), SubscriptionAddressFamily::Ipv4) {
-        return;
+        return Ok(());
     }
 
-    let _ = super::leave_multicast_group(&socket.receive_socket, config);
-
-    if let Some(udp_socket) = &socket.windows_udp_receive_socket {
-        let _ = super::leave_multicast_group(udp_socket, config);
+    let primary = super::leave_multicast_group(&socket.receive_socket, config);
+    let udp = super::leave_multicast_group(&socket.windows_udp_receive_socket, config);
+    match (primary, udp) {
+        (Err(err), _) | (Ok(()), Err(err)) => Err(err),
+        (Ok(()), Ok(())) => Ok(()),
     }
 }
 
@@ -802,7 +1083,10 @@ fn resolve_ipv4_interface_index(interface: Ipv4Addr) -> Result<u32, McrxError> {
         while !cursor.is_null() {
             let addr = (*cursor).ifa_addr;
 
-            if !addr.is_null() && (*addr).sa_family as libc::c_int == libc::AF_INET {
+            if !addr.is_null()
+                && !(*cursor).ifa_name.is_null()
+                && (*addr).sa_family as libc::c_int == libc::AF_INET
+            {
                 let sockaddr = &*(addr as *const libc::sockaddr_in);
                 let candidate = Ipv4Addr::from(u32::from_be(sockaddr.sin_addr.s_addr));
                 if candidate == interface {
@@ -856,7 +1140,7 @@ fn raw_packet_from_parts(
 ) -> RawPacket {
     RawPacket {
         subscription_id,
-        datagram: Bytes::copy_from_slice(datagram),
+        datagram: Bytes::copy_from_slice(&datagram[..parsed.datagram_len]),
         source_ip: Some(parsed.source_ip),
         group: Some(parsed.destination_ip),
         ip_protocol: Some(parsed.protocol),
@@ -865,35 +1149,52 @@ fn raw_packet_from_parts(
 }
 
 #[cfg(target_os = "macos")]
-fn first_matching_apple_bpf_packet(
+fn next_matching_apple_bpf_packet(
     packet_block: &[u8],
+    start_offset: usize,
     datalink: u32,
     interface_index: Option<u32>,
     subscription_id: SubscriptionId,
     config: &RawSubscriptionConfig,
-) -> Result<Option<RawPacket>, McrxError> {
-    let mut offset = 0;
+) -> Result<(Option<RawPacket>, usize), McrxError> {
+    let mut offset = start_offset;
     let header_len = std::mem::size_of::<libc::bpf_hdr>();
 
     while offset + header_len <= packet_block.len() {
         let header = unsafe {
             std::ptr::read_unaligned(packet_block[offset..].as_ptr().cast::<libc::bpf_hdr>())
         };
-        let data_start = offset + header.bh_hdrlen as usize;
-        let data_end = data_start + header.bh_caplen as usize;
+        let record_len = (header.bh_hdrlen as usize).checked_add(header.bh_caplen as usize);
+        let Some(record_len) = record_len else {
+            return Ok((None, packet_block.len()));
+        };
+        let next_offset = offset
+            .checked_add(bpf_word_align(record_len))
+            .unwrap_or(packet_block.len());
+
+        if (header.bh_hdrlen as usize) < header_len {
+            return Ok((None, packet_block.len()));
+        }
+
+        let Some(data_start) = offset.checked_add(header.bh_hdrlen as usize) else {
+            return Ok((None, packet_block.len()));
+        };
+        let Some(data_end) = data_start.checked_add(header.bh_caplen as usize) else {
+            return Ok((None, packet_block.len()));
+        };
 
         if data_end > packet_block.len() {
-            break;
+            return Ok((None, packet_block.len()));
         }
 
         let frame = &packet_block[data_start..data_end];
         let Some(datagram) = strip_apple_link_layer(frame, datalink)? else {
-            offset += bpf_word_align(header.bh_hdrlen as usize + header.bh_caplen as usize);
+            offset = next_offset;
             continue;
         };
 
         let Some(parsed) = parse_ip_datagram(datagram) else {
-            offset += bpf_word_align(header.bh_hdrlen as usize + header.bh_caplen as usize);
+            offset = next_offset;
             continue;
         };
 
@@ -904,18 +1205,21 @@ fn first_matching_apple_bpf_packet(
             metadata.destination_local_ip = Some(parsed.destination_ip);
             metadata.ingress_interface_index = interface_index;
 
-            return Ok(Some(raw_packet_from_parts(
-                subscription_id,
-                datagram,
-                parsed,
-                metadata,
-            )));
+            return Ok((
+                Some(raw_packet_from_parts(
+                    subscription_id,
+                    datagram,
+                    parsed,
+                    metadata,
+                )),
+                next_offset,
+            ));
         }
 
-        offset += bpf_word_align(header.bh_hdrlen as usize + header.bh_caplen as usize);
+        offset = next_offset;
     }
 
-    Ok(None)
+    Ok((None, offset))
 }
 
 #[cfg(target_os = "macos")]
@@ -980,6 +1284,11 @@ fn parse_ipv4_datagram(datagram: &[u8]) -> Option<ParsedIpDatagram> {
         return None;
     }
 
+    let datagram_len = u16::from_be_bytes([datagram[2], datagram[3]]) as usize;
+    if datagram_len < ihl || datagram.len() < datagram_len {
+        return None;
+    }
+
     Some(ParsedIpDatagram {
         source_ip: IpAddr::V4(Ipv4Addr::new(
             datagram[12],
@@ -994,6 +1303,7 @@ fn parse_ipv4_datagram(datagram: &[u8]) -> Option<ParsedIpDatagram> {
             datagram[19],
         )),
         protocol: datagram[9],
+        datagram_len,
     })
 }
 
@@ -1005,17 +1315,158 @@ fn parse_ipv6_datagram(datagram: &[u8]) -> Option<ParsedIpDatagram> {
 
     let source = <[u8; 16]>::try_from(&datagram[8..24]).ok()?;
     let destination = <[u8; 16]>::try_from(&datagram[24..40]).ok()?;
+    let payload_len = u16::from_be_bytes([datagram[4], datagram[5]]) as usize;
+
+    // A zero payload length with a hop-by-hop header can identify a jumbogram,
+    // which this bounded receive API does not claim to support.
+    if payload_len == 0 && datagram[6] == 0 {
+        return None;
+    }
+
+    let datagram_len = 40usize.checked_add(payload_len)?;
+    if datagram.len() < datagram_len {
+        return None;
+    }
 
     Some(ParsedIpDatagram {
         source_ip: IpAddr::V6(Ipv6Addr::from(source)),
         destination_ip: IpAddr::V6(Ipv6Addr::from(destination)),
         protocol: datagram[6],
+        datagram_len,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn run_bpf_filter(instructions: &[ClassicBpfInstruction], packet: &[u8]) -> u32 {
+        let mut accumulator = 0u32;
+        let mut pc = 0usize;
+
+        loop {
+            let instruction = instructions[pc];
+            match instruction.code {
+                code if code == (BPF_LD | BPF_B | BPF_ABS) => {
+                    accumulator = packet[instruction.k as usize] as u32;
+                    pc += 1;
+                }
+                code if code == (BPF_LD | BPF_W | BPF_ABS) => {
+                    let offset = instruction.k as usize;
+                    accumulator = u32::from_be_bytes(
+                        packet[offset..offset + 4]
+                            .try_into()
+                            .expect("four-byte BPF load"),
+                    );
+                    pc += 1;
+                }
+                code if code == (BPF_ALU | BPF_AND | BPF_K) => {
+                    accumulator &= instruction.k;
+                    pc += 1;
+                }
+                code if code == (BPF_JMP | BPF_JEQ | BPF_K) => {
+                    let jump = if accumulator == instruction.k {
+                        instruction.jt
+                    } else {
+                        instruction.jf
+                    };
+                    pc += jump as usize + 1;
+                }
+                code if code == (BPF_RET | BPF_K) => return instruction.k,
+                code => panic!("unsupported test BPF instruction {code:#x}"),
+            }
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn kernel_filter_enforces_group_and_ssm_source() {
+        let mut datagram = [0u8; 20];
+        datagram[0] = 0x45;
+        datagram[2..4].copy_from_slice(&20u16.to_be_bytes());
+        datagram[9] = 17;
+        datagram[12..16].copy_from_slice(&[10, 1, 2, 3]);
+        datagram[16..20].copy_from_slice(&[232, 1, 2, 3]);
+        let config =
+            RawSubscriptionConfig::ssm(Ipv4Addr::new(232, 1, 2, 3), Ipv4Addr::new(10, 1, 2, 3));
+        let filter = bpf_ip_filter(&config, 0);
+
+        assert_ne!(run_bpf_filter(&filter, &datagram), 0);
+
+        datagram[15] = 4;
+        assert_eq!(run_bpf_filter(&filter, &datagram), 0);
+        datagram[15] = 3;
+        datagram[19] = 4;
+        assert_eq!(run_bpf_filter(&filter, &datagram), 0);
+    }
+
+    #[cfg(target_os = "macos")]
+    fn append_bpf_record(block: &mut Vec<u8>, datagram: &[u8]) {
+        let mut header = unsafe { std::mem::zeroed::<libc::bpf_hdr>() };
+        header.bh_hdrlen = std::mem::size_of::<libc::bpf_hdr>() as _;
+        header.bh_caplen = datagram.len() as _;
+        header.bh_datalen = datagram.len() as _;
+
+        let header_bytes = unsafe {
+            std::slice::from_raw_parts(
+                (&header as *const libc::bpf_hdr).cast::<u8>(),
+                std::mem::size_of::<libc::bpf_hdr>(),
+            )
+        };
+        let record_len = header_bytes.len() + datagram.len();
+        block.extend_from_slice(header_bytes);
+        block.extend_from_slice(datagram);
+        block.resize(block.len() + bpf_word_align(record_len) - record_len, 0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn bpf_batch_preserves_every_matching_record() {
+        fn datagram(source_last_octet: u8) -> [u8; 20] {
+            let mut datagram = [0u8; 20];
+            datagram[0] = 0x45;
+            datagram[2..4].copy_from_slice(&20u16.to_be_bytes());
+            datagram[9] = 17;
+            datagram[12..16].copy_from_slice(&[10, 1, 2, source_last_octet]);
+            datagram[16..20].copy_from_slice(&[239, 1, 2, 3]);
+            datagram
+        }
+
+        let mut block = Vec::new();
+        append_bpf_record(&mut block, &datagram(3));
+        append_bpf_record(&mut block, &datagram(4));
+        let config = RawSubscriptionConfig::asm(Ipv4Addr::new(239, 1, 2, 3));
+
+        let (first, offset) = next_matching_apple_bpf_packet(
+            &block,
+            0,
+            libc::DLT_RAW,
+            Some(7),
+            SubscriptionId(1),
+            &config,
+        )
+        .unwrap();
+        let (second, end) = next_matching_apple_bpf_packet(
+            &block,
+            offset,
+            libc::DLT_RAW,
+            Some(7),
+            SubscriptionId(1),
+            &config,
+        )
+        .unwrap();
+
+        assert_eq!(
+            first.unwrap().source_ip,
+            Some(Ipv4Addr::new(10, 1, 2, 3).into())
+        );
+        assert_eq!(
+            second.unwrap().source_ip,
+            Some(Ipv4Addr::new(10, 1, 2, 4).into())
+        );
+        assert_eq!(end, block.len());
+    }
 
     #[test]
     fn parses_ipv4_datagram_fields() {
@@ -1054,6 +1505,36 @@ mod tests {
     fn malformed_datagram_is_rejected() {
         assert!(parse_ip_datagram(&[0x45, 0x00, 0x00]).is_none());
         assert!(parse_ip_datagram(&[0x70; 8]).is_none());
+
+        let mut truncated_ipv4 = [0u8; 20];
+        truncated_ipv4[0] = 0x45;
+        truncated_ipv4[2..4].copy_from_slice(&28u16.to_be_bytes());
+        assert!(parse_ip_datagram(&truncated_ipv4).is_none());
+
+        let mut truncated_ipv6 = [0u8; 40];
+        truncated_ipv6[0] = 0x60;
+        truncated_ipv6[4..6].copy_from_slice(&8u16.to_be_bytes());
+        assert!(parse_ip_datagram(&truncated_ipv6).is_none());
+    }
+
+    #[test]
+    fn raw_packet_trims_link_layer_padding_to_ip_length() {
+        let mut datagram = vec![0u8; 32];
+        datagram[0] = 0x45;
+        datagram[2..4].copy_from_slice(&20u16.to_be_bytes());
+        datagram[9] = 17;
+        datagram[12..16].copy_from_slice(&[10, 1, 2, 3]);
+        datagram[16..20].copy_from_slice(&[239, 1, 2, 3]);
+        let parsed = parse_ip_datagram(&datagram).unwrap();
+
+        let packet = raw_packet_from_parts(
+            SubscriptionId(1),
+            &datagram,
+            parsed,
+            ReceiveMetadata::empty(),
+        );
+
+        assert_eq!(packet.datagram.len(), 20);
     }
 
     #[test]
@@ -1062,6 +1543,7 @@ mod tests {
             source_ip: IpAddr::V6(Ipv6Addr::LOCALHOST),
             destination_ip: IpAddr::V6("ff3e::8000:1234".parse().unwrap()),
             protocol: 17,
+            datagram_len: 40,
         };
         let config = RawSubscriptionConfig::asm(Ipv4Addr::new(239, 1, 2, 3));
 
@@ -1074,8 +1556,9 @@ mod tests {
             source_ip: IpAddr::V4(Ipv4Addr::new(10, 1, 2, 3)),
             destination_ip: IpAddr::V4(Ipv4Addr::new(239, 1, 2, 3)),
             protocol: 17,
+            datagram_len: 20,
         };
-        let config = RawSubscriptionConfig::asm_v6("ff3e::8000:1234".parse().unwrap());
+        let config = RawSubscriptionConfig::asm_v6("ff12::8000:1234".parse().unwrap());
 
         assert!(!packet_matches_config(parsed, &config));
     }

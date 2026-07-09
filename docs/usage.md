@@ -25,7 +25,9 @@ let config = SubscriptionConfig::ssm(group, source, port);
 ```
 
 IPv4 SSM groups must be in `232.0.0.0/8`; IPv6 SSM groups must be in
-`ff3x::/32`. Use ASM for groups outside those ranges.
+`ff3x::/32`. Those ranges require a source filter, while groups outside them
+must use ASM. Unspecified, multicast, and IPv4 broadcast source addresses are
+rejected before socket setup.
 
 For IPv4 SSM on macOS, mcrx uses `IP_ADD_SOURCE_MEMBERSHIP` with an explicit
 local interface address. If tcpdump or Wireshark still shows IGMPv2 reports for
@@ -125,12 +127,16 @@ let mut packets = Vec::new();
 ctx.try_recv_batch_into(&mut packets, 64)?;
 ```
 
-Drain everything currently available:
+Drain up to the convenience safety limit (4096 packets per call):
 
 ```rust
 let mut packets = Vec::new();
 ctx.try_recv_all_into(&mut packets)?;
 ```
+
+Use `try_recv_batch_into()` when the application needs a different explicit
+budget. The bounded convenience method cannot be kept alive indefinitely by a
+continuous packet stream.
 
 ## Event Loop Integration
 

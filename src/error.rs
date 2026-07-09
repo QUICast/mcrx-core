@@ -12,6 +12,10 @@ pub enum McrxError {
     #[error("MCRX: group must be a multicast IP address")]
     InvalidMulticastGroup,
 
+    /// An SSM-reserved multicast group was configured without a source filter.
+    #[error("MCRX: SSM-range multicast groups require a source address")]
+    SsmGroupRequiresSource,
+
     /// The configured SSM source address is invalid.
     #[error("MCRX: invalid source address")]
     InvalidSourceAddress,
@@ -80,9 +84,25 @@ pub enum McrxError {
     #[error("MCRX: raw multicast receive is not supported on this platform: {0}")]
     RawPacketReceiveUnsupported(String),
 
-    /// The requested IPv6 functionality is not implemented yet.
+    /// Legacy placeholder retained for source compatibility.
+    ///
+    /// IPv6 receive is implemented and this variant is no longer returned.
+    #[deprecated(note = "IPv6 receive is implemented; this variant is never returned")]
     #[error("MCRX: requested IPv6 functionality is not implemented yet")]
     Ipv6NotYetImplemented,
+
+    /// A low-level subscription contains internally inconsistent address families.
+    #[error("MCRX: invalid subscription address-family combination")]
+    InvalidSubscriptionAddressFamily,
+
+    /// A low-level adopted receive socket could not be prepared safely.
+    #[error("MCRX: receive socket setup failed: {0}")]
+    ReceiveSocketSetupFailed(String),
+
+    /// A received datagram did not include the destination metadata needed to
+    /// verify that it belongs to the subscription.
+    #[error("MCRX: receive packet did not include destination address metadata")]
+    ReceiveMetadataUnavailable,
 
     /// Reading the local address of an existing socket failed.
     #[error("MCRX: failed to read local address from existing socket: {0}")]
@@ -118,7 +138,10 @@ pub enum McrxError {
     )]
     Ipv6SourceSpecificMulticastRequiresInterface,
 
-    /// IPv6 source-specific multicast has not been wired into the receiver yet.
+    /// Legacy placeholder retained for source compatibility.
+    ///
+    /// IPv6 SSM receive is implemented and this variant is no longer returned.
+    #[deprecated(note = "IPv6 SSM receive is implemented; this variant is never returned")]
     #[error("MCRX: IPv6 source-specific multicast is not implemented yet")]
     Ipv6SourceSpecificMulticastNotYetImplemented,
 

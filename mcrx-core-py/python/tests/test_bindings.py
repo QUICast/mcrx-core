@@ -28,9 +28,25 @@ def _existing_interface_name() -> str:
 
 
 class BindingsTest(unittest.TestCase):
+    def test_reader_fd_is_closed_even_after_event_loop_shutdown(self) -> None:
+        class ClosedLoop:
+            def is_closed(self) -> bool:
+                return True
+
+            def remove_reader(self, _fd: int) -> None:
+                raise AssertionError("remove_reader must not run on a closed loop")
+
+        reader, writer = os.pipe()
+        try:
+            mcrx_asyncio._close_reader_fd(ClosedLoop(), reader)  # type: ignore[arg-type,attr-defined]
+            with self.assertRaises(OSError):
+                os.fstat(reader)
+        finally:
+            os.close(writer)
+
     def test_add_subscription_parses_numeric_ipv6_interface_index(self) -> None:
         ctx = Context()
-        sub = ctx.add_subscription("ff3e::8000:1234", 55129, interface="7")
+        sub = ctx.add_subscription("ff1e::8000:1234", 55129, interface="7")
 
         self.assertIsNone(sub.interface)
         self.assertEqual(sub.interface_index, 7)
@@ -39,7 +55,7 @@ class BindingsTest(unittest.TestCase):
         ctx = Context()
         interface_name = _existing_interface_name()
         sub = ctx.add_subscription(
-            "ff32::8000:1234",
+            "ff12::8000:1234",
             55128,
             interface=f"fe80::1%{interface_name}",
         )

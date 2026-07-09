@@ -157,9 +157,9 @@ fn print_usage(program: &str) {
     eprintln!("  interface  optional local interface address");
     eprintln!("examples:");
     eprintln!("  {program} ff01::1234 5000 --interface ::1");
-    eprintln!("  {program} ff32::8000:1234 5000 --interface fe80::1%7");
-    eprintln!("  {program} ff32::8000:1234 5000 --interface fe80::1%en0");
-    eprintln!("  {program} ff3e::8000:1234 5000 --interface 7");
+    eprintln!("  {program} ff12::8000:1234 5000 --interface fe80::1%7");
+    eprintln!("  {program} ff12::8000:1234 5000 --interface fe80::1%en0");
+    eprintln!("  {program} ff1e::8000:1234 5000 --interface 7");
     eprintln!("  {program} ff31::8000:1234 5000 <sender-ipv6> --interface <receiver-ipv6>");
     eprintln!("notes:");
     eprintln!("  - for IPv4 SSM, use 232.0.0.0/8 groups such as 232.1.2.3");

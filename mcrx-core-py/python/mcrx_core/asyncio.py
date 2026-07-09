@@ -28,6 +28,20 @@ def _duplicate_reader_fd(subscription: Subscription) -> int | None:
         return None
 
 
+def _close_reader_fd(loop: asyncio.AbstractEventLoop, reader_fd: int) -> None:
+    try:
+        if not loop.is_closed():
+            loop.remove_reader(reader_fd)
+    except (RuntimeError, ValueError):
+        if not loop.is_closed():
+            raise
+    finally:
+        try:
+            os.close(reader_fd)
+        except OSError:
+            pass
+
+
 class ReaderHandle:
     def __init__(self, close_cb: Callable[[], None]) -> None:
         self._close_cb = close_cb
@@ -124,8 +138,7 @@ async def _recv_async(
             try:
                 await future
             finally:
-                running_loop.remove_reader(reader_fd)
-                os.close(reader_fd)
+                _close_reader_fd(running_loop, reader_fd)
     else:
         while True:
             packet = recv_nowait()
@@ -171,8 +184,7 @@ def add_reader(
                 return
 
             closed = True
-            running_loop.remove_reader(reader_fd)
-            os.close(reader_fd)
+            _close_reader_fd(running_loop, reader_fd)
 
         def on_ready() -> None:
             try:

@@ -2,6 +2,7 @@
 name = "mcrx-core-py"
 version = "0.2.2"
 edition = "2024"
+rust-version = "1.88"
 license = "BSD-2-Clause"
 description = "Python bindings for the mcrx-core multicast receiver library."
 repository = "https://github.com/QUICast/mcrx-core"
@@ -12,12 +13,13 @@ readme = "README.md"
 crate-type = ["cdylib"]
 
 [dependencies]
-mcrx-core = { version = "0.2.5", path = ".." }
-pyo3 = { version = "0.28.3", features = ["extension-module", "abi3-py39"] }
+mcrx-core = { version = "0.2.7", path = ".." }
+pyo3 = { version = "0.29.0", features = ["extension-module", "abi3-py39"] }
+bytes = "1"
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_NetworkManagement_IpHelper"] }
 
 [build-dependencies]
-pyo3-build-config = "0.28.3"
+pyo3-build-config = "0.29.0"

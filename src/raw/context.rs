@@ -4,11 +4,17 @@ use crate::raw::{RawPacket, RawSubscription, RawSubscriptionConfig};
 use crate::subscription::SubscriptionId;
 
 /// Owns and manages the set of active raw multicast subscriptions.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct RawContext {
     subscriptions: Vec<RawSubscription>,
     next_subscription_id: u64,
     next_recv_index: usize,
+}
+
+impl Default for RawContext {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RawContext {
@@ -165,11 +171,17 @@ mod tests {
         assert!(matches!(err, McrxError::InvalidMulticastGroup));
     }
 
+    #[test]
+    fn default_uses_the_same_id_sequence_as_new() {
+        let context = RawContext::default();
+        assert_eq!(context.next_subscription_id, 1);
+    }
+
     #[cfg(not(target_os = "linux"))]
     #[test]
     fn raw_subscriptions_return_unsupported_when_platform_requirements_are_not_met() {
         let mut ctx = RawContext::new();
-        let config = RawSubscriptionConfig::asm_v6("ff3e::8000:1234".parse::<Ipv6Addr>().unwrap());
+        let config = RawSubscriptionConfig::asm_v6("ff12::1234".parse::<Ipv6Addr>().unwrap());
 
         let err = ctx.add_subscription(config).unwrap_err();
         assert!(matches!(err, McrxError::RawPacketReceiveUnsupported(_)));

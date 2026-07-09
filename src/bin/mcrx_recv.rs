@@ -581,9 +581,9 @@ fn print_usage(program: &str) {
     eprintln!("  {program} 232.1.2.3 5000 192.168.1.10 192.168.1.20");
     eprintln!("  {program} ff01::1234 5000");
     eprintln!("  {program} ff01::1234 5000 --interface ::1");
-    eprintln!("  {program} ff32::8000:1234 5000 --interface fe80::1%7");
-    eprintln!("  {program} ff32::8000:1234 5000 --interface fe80::1%en0");
-    eprintln!("  {program} ff3e::8000:1234 5000 --interface 7");
+    eprintln!("  {program} ff12::8000:1234 5000 --interface fe80::1%7");
+    eprintln!("  {program} ff12::8000:1234 5000 --interface fe80::1%en0");
+    eprintln!("  {program} ff1e::8000:1234 5000 --interface 7");
     eprintln!("  {program} ff31::8000:1234 5000 <sender-ipv6> --interface <receiver-ipv6>");
     eprintln!();
     eprintln!("Notes:");
@@ -601,7 +601,7 @@ fn print_usage(program: &str) {
     eprintln!(
         "  - for IPv6 SSM, pass --interface <receiver-ipv6-or-ifindex>; this is required on macOS"
     );
-    eprintln!("  - for link-local IPv6 SSM groups such as ff32::/16, send from a fe80:: source");
+    eprintln!("  - for link-local IPv6 SSM groups such as ff32::/32, send from a fe80:: source");
 
     #[cfg(feature = "metrics")]
     {

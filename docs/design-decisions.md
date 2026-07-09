@@ -116,8 +116,11 @@ non-exhaustive `ReceiveMetadata` struct. That metadata currently includes:
 - pktinfo-style destination local IP on supported Unix and Windows IPv4 and IPv6 platforms
 - pktinfo-style ingress interface index on supported Unix and Windows IPv4 and IPv6 platforms
 
-Where the platform layer does not provide those ancillary messages yet, the
-pktinfo-derived fields remain `None`.
+Destination metadata is also used internally to reject unicast, wrong-group,
+or wrong-source traffic before it can be labeled as belonging to a
+subscription. A platform that cannot provide destination metadata returns an
+explicit setup/receive error instead of silently weakening that invariant.
+Ingress-interface metadata can still remain `None` where the platform omits it.
 
 ## Optional Tokio Layer
 

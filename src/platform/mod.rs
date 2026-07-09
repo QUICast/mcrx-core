@@ -1,5 +1,5 @@
 use crate::config::{
-    Ipv4Membership, Ipv6Membership, SubscriptionAddressFamily, SubscriptionConfig,
+    Ipv4Membership, Ipv6Membership, SourceFilter, SubscriptionAddressFamily, SubscriptionConfig,
 };
 use crate::error::McrxError;
 use crate::packet::{Packet, PacketWithMetadata, ReceiveMetadata};
@@ -40,13 +40,13 @@ pub(crate) use raw::{
 fn ipv4_membership(config: &SubscriptionConfig) -> Result<Ipv4Membership, McrxError> {
     config
         .ipv4_membership()
-        .ok_or(McrxError::Ipv6NotYetImplemented)
+        .ok_or(McrxError::InvalidSubscriptionAddressFamily)
 }
 
 fn ipv6_membership(config: &SubscriptionConfig) -> Result<Ipv6Membership, McrxError> {
     config
         .ipv6_membership()
-        .ok_or(McrxError::Ipv6NotYetImplemented)
+        .ok_or(McrxError::InvalidSubscriptionAddressFamily)
 }
 
 fn resolve_ipv4_interface(config: &SubscriptionConfig) -> Result<Ipv4Addr, McrxError> {
@@ -100,6 +100,25 @@ fn set_port_reuse_if_supported(_socket: &Socket) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+fn restrict_multicast_delivery_to_socket_memberships(
+    socket: &Socket,
+    family: SubscriptionAddressFamily,
+) -> std::io::Result<()> {
+    match family {
+        SubscriptionAddressFamily::Ipv4 => socket.set_multicast_all_v4(false),
+        SubscriptionAddressFamily::Ipv6 => socket.set_multicast_all_v6(false),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn restrict_multicast_delivery_to_socket_memberships(
+    _socket: &Socket,
+    _family: SubscriptionAddressFamily,
+) -> std::io::Result<()> {
+    Ok(())
+}
+
 #[cfg(unix)]
 #[repr(C)]
 struct GroupSourceRequest {
@@ -119,14 +138,21 @@ type GroupSourceSockAddrStorage = [u8; std::mem::size_of::<libc::sockaddr_storag
 #[cfg(all(unix, not(target_vendor = "apple")))]
 type GroupSourceSockAddrStorage = libc::sockaddr_storage;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DetailedReceiveMode {
-    Basic,
-    Ancillary,
-}
-
 #[cfg(any(unix, windows))]
 const ANCILLARY_STACK_BUFFER_SIZE: usize = 256;
+const MAX_FILTERED_DATAGRAMS_PER_RECEIVE: usize = 256;
+
+#[cfg(unix)]
+union AncillaryBuffer {
+    _alignment: libc::cmsghdr,
+    bytes: [std::mem::MaybeUninit<u8>; ANCILLARY_STACK_BUFFER_SIZE],
+}
+
+#[cfg(windows)]
+union AncillaryBuffer {
+    _alignment: CMSGHDR,
+    bytes: [std::mem::MaybeUninit<u8>; ANCILLARY_STACK_BUFFER_SIZE],
+}
 
 #[cfg(windows)]
 type WsaRecvMsgFn = unsafe extern "system" fn(
@@ -140,7 +166,7 @@ type WsaRecvMsgFn = unsafe extern "system" fn(
 pub(crate) struct ReceiveSocket {
     socket: Socket,
     local_addr: Option<SocketAddr>,
-    detailed_receive_mode: DetailedReceiveMode,
+    setup_error: Option<String>,
     #[cfg(windows)]
     wsarecvmsg: Option<WsaRecvMsgFn>,
 }
@@ -149,26 +175,89 @@ impl std::fmt::Debug for ReceiveSocket {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ReceiveSocket")
             .field("local_addr", &self.local_addr)
-            .field("detailed_receive_mode", &self.detailed_receive_mode)
+            .field("setup_error", &self.setup_error)
             .finish_non_exhaustive()
     }
 }
 
 impl ReceiveSocket {
-    pub(crate) fn adopt(socket: Socket) -> Self {
+    pub(crate) fn adopt(socket: Socket, config: &SubscriptionConfig) -> Self {
         let local_addr = try_socket_local_addr(&socket).ok();
 
+        let validation_error = config.validate().err().map(|err| err.to_string());
+        let isolation_error =
+            restrict_multicast_delivery_to_socket_memberships(&socket, config.family())
+                .err()
+                .map(|err| McrxError::SocketOptionFailed(err).to_string());
+        let nonblocking_error = socket
+            .set_nonblocking(true)
+            .err()
+            .map(|err| McrxError::SocketOptionFailed(err).to_string());
+
         #[cfg(windows)]
-        let (detailed_receive_mode, wsarecvmsg) = configure_detailed_receive(&socket);
+        let (wsarecvmsg, metadata_error) = if validation_error.is_some()
+            || isolation_error.is_some()
+            || nonblocking_error.is_some()
+        {
+            (None, None)
+        } else {
+            match configure_detailed_receive(&socket) {
+                Ok(recvmsg) => (Some(recvmsg), None),
+                Err(err) => (None, Some(err.to_string())),
+            }
+        };
         #[cfg(not(windows))]
-        let detailed_receive_mode = configure_detailed_receive(&socket);
+        let metadata_error = if validation_error.is_some()
+            || isolation_error.is_some()
+            || nonblocking_error.is_some()
+        {
+            None
+        } else {
+            match configure_detailed_receive(&socket) {
+                Ok(()) => None,
+                Err(err) => Some(err.to_string()),
+            }
+        };
 
         Self {
             socket,
             local_addr,
-            detailed_receive_mode,
+            setup_error: validation_error
+                .or(isolation_error)
+                .or(nonblocking_error)
+                .or(metadata_error),
             #[cfg(windows)]
             wsarecvmsg,
+        }
+    }
+
+    fn try_adopt(socket: Socket, config: &SubscriptionConfig) -> Result<Self, McrxError> {
+        config.validate()?;
+        restrict_multicast_delivery_to_socket_memberships(&socket, config.family())
+            .map_err(McrxError::SocketOptionFailed)?;
+        socket
+            .set_nonblocking(true)
+            .map_err(McrxError::SocketOptionFailed)?;
+        let local_addr = Some(try_socket_local_addr(&socket)?);
+
+        #[cfg(windows)]
+        let wsarecvmsg = Some(configure_detailed_receive(&socket)?);
+        #[cfg(not(windows))]
+        configure_detailed_receive(&socket)?;
+
+        Ok(Self {
+            socket,
+            local_addr,
+            setup_error: None,
+            #[cfg(windows)]
+            wsarecvmsg,
+        })
+    }
+
+    fn ensure_ready(&self) -> Result<(), McrxError> {
+        match &self.setup_error {
+            Some(message) => Err(McrxError::ReceiveSocketSetupFailed(message.clone())),
+            None => Ok(()),
         }
     }
 
@@ -198,10 +287,6 @@ impl ReceiveSocket {
             destination_local_ip: None,
             ingress_interface_index: None,
         })
-    }
-
-    fn uses_ancillary_metadata(&self) -> bool {
-        matches!(self.detailed_receive_mode, DetailedReceiveMode::Ancillary)
     }
 
     #[cfg(windows)]
@@ -257,13 +342,27 @@ fn ipv6_sockaddr_storage(addr: Ipv6Addr) -> libc::sockaddr_storage {
 #[cfg(all(unix, target_vendor = "apple"))]
 fn ipv6_sockaddr_storage(addr: Ipv6Addr) -> GroupSourceSockAddrStorage {
     let mut storage = [0u8; std::mem::size_of::<libc::sockaddr_storage>()];
-    let sockaddr = unsafe { &mut *storage.as_mut_ptr().cast::<libc::sockaddr_in6>() };
-    *sockaddr = unsafe { std::mem::zeroed() };
-    sockaddr.sin6_len = std::mem::size_of::<libc::sockaddr_in6>() as _;
-    sockaddr.sin6_family = libc::AF_INET6 as _;
-    sockaddr.sin6_addr = libc::in6_addr {
-        s6_addr: addr.octets(),
+    let sockaddr = libc::sockaddr_in6 {
+        sin6_len: std::mem::size_of::<libc::sockaddr_in6>() as _,
+        sin6_family: libc::AF_INET6 as _,
+        sin6_port: 0,
+        sin6_flowinfo: 0,
+        sin6_addr: libc::in6_addr {
+            s6_addr: addr.octets(),
+        },
+        sin6_scope_id: 0,
     };
+
+    // Darwin packs group_source_req to four-byte alignment. Copying from an
+    // aligned local avoids creating an unaligned sockaddr_in6 reference inside
+    // the byte-array representation used to match that ABI.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            (&sockaddr as *const libc::sockaddr_in6).cast::<u8>(),
+            storage.as_mut_ptr(),
+            std::mem::size_of::<libc::sockaddr_in6>(),
+        );
+    }
     storage
 }
 
@@ -306,7 +405,10 @@ pub(crate) fn resolve_ipv6_interface_index(interface: Ipv6Addr) -> Result<u32, M
         while !cursor.is_null() {
             let addr = (*cursor).ifa_addr;
 
-            if !addr.is_null() && (*addr).sa_family as libc::c_int == libc::AF_INET6 {
+            if !addr.is_null()
+                && !(*cursor).ifa_name.is_null()
+                && (*addr).sa_family as libc::c_int == libc::AF_INET6
+            {
                 let sockaddr = &*(addr as *const libc::sockaddr_in6);
                 if Ipv6Addr::from(sockaddr.sin6_addr.s6_addr) == interface {
                     let index = libc::if_nametoindex((*cursor).ifa_name);
@@ -368,7 +470,8 @@ pub(crate) fn resolve_ipv6_interface_index(interface: Ipv6Addr) -> Result<u32, M
     let mut buf_len = INITIAL_BUFFER_SIZE as u32;
 
     loop {
-        let mut buffer = vec![0u8; buf_len as usize];
+        let word_count = (buf_len as usize).div_ceil(std::mem::size_of::<usize>());
+        let mut buffer = vec![0usize; word_count];
         let result = unsafe {
             GetAdaptersAddresses(
                 AF_UNSPEC as u32,
@@ -777,16 +880,10 @@ fn enable_receive_metadata(
 }
 
 #[cfg(all(unix, any(target_os = "linux", target_os = "android")))]
-fn configure_detailed_receive(socket: &Socket) -> DetailedReceiveMode {
-    let Some(family) = socket_family(socket) else {
-        return DetailedReceiveMode::Basic;
-    };
-
-    if enable_receive_metadata(socket, family).is_ok() {
-        DetailedReceiveMode::Ancillary
-    } else {
-        DetailedReceiveMode::Basic
-    }
+fn configure_detailed_receive(socket: &Socket) -> Result<(), McrxError> {
+    let family = socket_family(socket).ok_or(McrxError::ExistingSocketAddressFamilyMismatch)?;
+    enable_receive_metadata(socket, family)?;
+    Ok(())
 }
 
 #[cfg(all(
@@ -799,32 +896,17 @@ fn configure_detailed_receive(socket: &Socket) -> DetailedReceiveMode {
         target_os = "openbsd"
     )
 ))]
-fn configure_detailed_receive(socket: &Socket) -> DetailedReceiveMode {
-    let Some(family) = socket_family(socket) else {
-        return DetailedReceiveMode::Basic;
-    };
-
-    if enable_receive_metadata(socket, family).is_ok() {
-        DetailedReceiveMode::Ancillary
-    } else {
-        DetailedReceiveMode::Basic
-    }
+fn configure_detailed_receive(socket: &Socket) -> Result<(), McrxError> {
+    let family = socket_family(socket).ok_or(McrxError::ExistingSocketAddressFamilyMismatch)?;
+    enable_receive_metadata(socket, family)?;
+    Ok(())
 }
 
 #[cfg(windows)]
-fn configure_detailed_receive(socket: &Socket) -> (DetailedReceiveMode, Option<WsaRecvMsgFn>) {
-    let Some(family) = socket_family(socket) else {
-        return (DetailedReceiveMode::Basic, None);
-    };
-
-    if enable_receive_metadata(socket, family).is_err() {
-        return (DetailedReceiveMode::Basic, None);
-    }
-
-    match get_wsarecvmsg(socket) {
-        Ok(recvmsg) => (DetailedReceiveMode::Ancillary, Some(recvmsg)),
-        Err(_) => (DetailedReceiveMode::Basic, None),
-    }
+fn configure_detailed_receive(socket: &Socket) -> Result<WsaRecvMsgFn, McrxError> {
+    let family = socket_family(socket).ok_or(McrxError::ExistingSocketAddressFamilyMismatch)?;
+    enable_receive_metadata(socket, family)?;
+    get_wsarecvmsg(socket)
 }
 
 #[cfg(not(any(
@@ -841,8 +923,10 @@ fn configure_detailed_receive(socket: &Socket) -> (DetailedReceiveMode, Option<W
         )
     )
 )))]
-fn configure_detailed_receive(_socket: &Socket) -> DetailedReceiveMode {
-    DetailedReceiveMode::Basic
+fn configure_detailed_receive(_socket: &Socket) -> Result<(), McrxError> {
+    Err(McrxError::ReceiveSocketSetupFailed(
+        "destination-address metadata is unsupported on this platform".to_string(),
+    ))
 }
 
 #[cfg(unix)]
@@ -1136,84 +1220,128 @@ fn apply_receive_ancillary_data(
     }
 }
 
+fn packet_matches_subscription(
+    source: SocketAddr,
+    metadata: &ReceiveMetadata,
+    config: &SubscriptionConfig,
+) -> Result<bool, McrxError> {
+    let destination = metadata
+        .destination_local_ip
+        .ok_or(McrxError::ReceiveMetadataUnavailable)?;
+
+    if destination != config.group {
+        return Ok(false);
+    }
+
+    if let SourceFilter::Source(expected_source) = config.source
+        && source.ip() != expected_source
+    {
+        return Ok(false);
+    }
+
+    if let Some(expected_index) = config.interface_index
+        && metadata.ingress_interface_index != Some(expected_index)
+    {
+        return Ok(false);
+    }
+
+    Ok(true)
+}
+
+fn filtered_receive_budget_exhausted(filtered: &mut usize) -> bool {
+    *filtered += 1;
+    *filtered >= MAX_FILTERED_DATAGRAMS_PER_RECEIVE
+}
+
 #[cfg(unix)]
 fn recv_packet_with_metadata_unix(
     socket: &ReceiveSocket,
     subscription_id: SubscriptionId,
     config: &SubscriptionConfig,
 ) -> Result<Option<PacketWithMetadata>, McrxError> {
-    let group = config.group;
     let family = config.family();
     let mut buf = [std::mem::MaybeUninit::<u8>::uninit(); 65535];
-    let mut iov = libc::iovec {
-        iov_base: buf.as_mut_ptr().cast(),
-        iov_len: buf.len(),
-    };
     let control_size = ancillary_buffer_size(family);
-    let mut control_stack = [std::mem::MaybeUninit::<u8>::uninit(); ANCILLARY_STACK_BUFFER_SIZE];
-    let mut control_heap;
-    let control = if control_size <= ANCILLARY_STACK_BUFFER_SIZE {
-        &mut control_stack[..control_size]
-    } else {
-        control_heap = vec![std::mem::MaybeUninit::<u8>::uninit(); control_size];
-        control_heap.as_mut_slice()
-    };
-    let mut control_len = 0usize;
-
-    let (len, addr) = match unsafe {
-        SockAddr::try_init(|addr_storage, addr_len| {
-            let mut msg: libc::msghdr = std::mem::zeroed();
-            msg.msg_name = addr_storage.cast();
-            msg.msg_namelen = *addr_len;
-            msg.msg_iov = std::ptr::addr_of_mut!(iov);
-            msg.msg_iovlen = 1;
-
-            if !control.is_empty() {
-                msg.msg_control = control.as_mut_ptr().cast();
-                msg.msg_controllen = control.len() as _;
-            }
-
-            let received = libc::recvmsg(socket.socket().as_raw_fd(), &mut msg, 0);
-            if received == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-
-            *addr_len = msg.msg_namelen;
-            control_len = msg.msg_controllen as usize;
-
-            Ok(received as usize)
-        })
-    } {
-        Ok(result) => result,
-        Err(err) if err.kind() == ErrorKind::WouldBlock => return Ok(None),
-        Err(err) => return Err(McrxError::ReceiveFailed(err)),
-    };
-
-    let source = addr.as_socket().ok_or(McrxError::NonIpSocketAddress)?;
-
-    // SAFETY: `recvmsg` initialized exactly the first `len` bytes of `buf`.
-    // We only create a slice over that initialized prefix, and copy it immediately.
-    let payload_bytes = unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, len) };
-
-    let mut metadata = socket.base_metadata(config)?;
-
-    if control_len != 0 {
-        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
-        msg.msg_control = control.as_mut_ptr().cast();
-        msg.msg_controllen = control_len as _;
-        apply_receive_ancillary_data(&msg, &mut metadata, family);
+    if control_size > ANCILLARY_STACK_BUFFER_SIZE {
+        return Err(McrxError::ReceiveSocketSetupFailed(format!(
+            "ancillary buffer requirement {control_size} exceeds {ANCILLARY_STACK_BUFFER_SIZE} bytes"
+        )));
     }
+    let mut control_storage = AncillaryBuffer {
+        bytes: [std::mem::MaybeUninit::<u8>::uninit(); ANCILLARY_STACK_BUFFER_SIZE],
+    };
+    // SAFETY: the active union field is `bytes`; the union also guarantees
+    // cmsghdr alignment for the control-message parser.
+    let control = unsafe { &mut control_storage.bytes[..control_size] };
+    let mut filtered = 0usize;
 
-    Ok(Some(PacketWithMetadata {
-        packet: Packet {
-            subscription_id,
-            source,
-            group,
-            dst_port: config.dst_port,
-            payload: Bytes::copy_from_slice(payload_bytes),
-        },
-        metadata,
-    }))
+    loop {
+        let mut iov = libc::iovec {
+            iov_base: buf.as_mut_ptr().cast(),
+            iov_len: buf.len(),
+        };
+        let mut control_len = 0usize;
+
+        let (len, addr) = match unsafe {
+            SockAddr::try_init(|addr_storage, addr_len| {
+                let mut msg: libc::msghdr = std::mem::zeroed();
+                msg.msg_name = addr_storage.cast();
+                msg.msg_namelen = *addr_len;
+                msg.msg_iov = std::ptr::addr_of_mut!(iov);
+                msg.msg_iovlen = 1;
+
+                if !control.is_empty() {
+                    msg.msg_control = control.as_mut_ptr().cast();
+                    msg.msg_controllen = control.len() as _;
+                }
+
+                let received = libc::recvmsg(socket.socket().as_raw_fd(), &mut msg, 0);
+                if received == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+
+                *addr_len = msg.msg_namelen;
+                control_len = msg.msg_controllen as usize;
+
+                Ok(received as usize)
+            })
+        } {
+            Ok(result) => result,
+            Err(err) if err.kind() == ErrorKind::WouldBlock => return Ok(None),
+            Err(err) => return Err(McrxError::ReceiveFailed(err)),
+        };
+
+        let source = addr.as_socket().ok_or(McrxError::NonIpSocketAddress)?;
+        let mut metadata = socket.base_metadata(config)?;
+
+        if control_len != 0 {
+            let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+            msg.msg_control = control.as_mut_ptr().cast();
+            msg.msg_controllen = control_len as _;
+            apply_receive_ancillary_data(&msg, &mut metadata, family);
+        }
+
+        if !packet_matches_subscription(source, &metadata, config)? {
+            if filtered_receive_budget_exhausted(&mut filtered) {
+                return Ok(None);
+            }
+            continue;
+        }
+
+        // SAFETY: `recvmsg` initialized exactly the first `len` bytes of `buf`.
+        let payload = unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), len) };
+
+        return Ok(Some(PacketWithMetadata {
+            packet: Packet {
+                subscription_id,
+                source,
+                group: config.group,
+                dst_port: config.dst_port,
+                payload: Bytes::copy_from_slice(payload),
+            },
+            metadata,
+        }));
+    }
 }
 
 #[cfg(windows)]
@@ -1222,88 +1350,98 @@ fn recv_packet_with_metadata_windows(
     subscription_id: SubscriptionId,
     config: &SubscriptionConfig,
 ) -> Result<Option<PacketWithMetadata>, McrxError> {
-    let group = config.group;
     let family = config.family();
-    let recvmsg = match socket.wsarecvmsg() {
-        Some(recvmsg) => recvmsg,
-        None => return recv_packet_impl(socket, subscription_id, config),
-    };
+    let recvmsg = socket.wsarecvmsg().ok_or_else(|| {
+        McrxError::ReceiveSocketSetupFailed("WSARecvMsg is unavailable".to_string())
+    })?;
     let mut buf = [std::mem::MaybeUninit::<u8>::uninit(); 65535];
-    let mut data_buf = WSABUF {
-        len: buf.len() as u32,
-        buf: buf.as_mut_ptr().cast(),
-    };
     let control_size = ancillary_buffer_size(family);
-    let mut control_stack = [std::mem::MaybeUninit::<u8>::uninit(); ANCILLARY_STACK_BUFFER_SIZE];
-    let mut control_heap;
-    let control = if control_size <= ANCILLARY_STACK_BUFFER_SIZE {
-        &mut control_stack[..control_size]
-    } else {
-        control_heap = vec![std::mem::MaybeUninit::<u8>::uninit(); control_size];
-        control_heap.as_mut_slice()
-    };
-    let mut bytes_received = 0u32;
-
-    let (msg, addr) = match unsafe {
-        SockAddr::try_init(|addr_storage, addr_len| {
-            let mut msg = WSAMSG::default();
-            msg.name = addr_storage.cast::<SOCKADDR>();
-            msg.namelen = *addr_len as i32;
-            msg.lpBuffers = std::ptr::addr_of_mut!(data_buf);
-            msg.dwBufferCount = 1;
-
-            if !control.is_empty() {
-                msg.Control = WSABUF {
-                    len: control.len() as u32,
-                    buf: control.as_mut_ptr().cast(),
-                };
-            }
-
-            let result = recvmsg(
-                raw_socket(socket.socket()),
-                &mut msg,
-                &mut bytes_received,
-                std::ptr::null_mut(),
-                None,
-            );
-
-            if result == SOCKET_ERROR {
-                return Err(last_wsa_error());
-            }
-
-            *addr_len = msg.namelen as _;
-
-            Ok(msg)
-        })
-    } {
-        Ok(result) => result,
-        Err(err) if err.kind() == ErrorKind::WouldBlock => return Ok(None),
-        Err(err) => return Err(McrxError::ReceiveFailed(err)),
-    };
-
-    let source = addr.as_socket().ok_or(McrxError::NonIpSocketAddress)?;
-
-    // SAFETY: `WSARecvMsg` initialized exactly the first `bytes_received` bytes of `buf`.
-    // We only create a slice over that initialized prefix, and copy it immediately.
-    let payload_bytes =
-        unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, bytes_received as usize) };
-
-    let mut metadata = socket.base_metadata(config)?;
-
-    if !msg.Control.buf.is_null() && msg.Control.len != 0 {
-        apply_receive_ancillary_data(&msg, &mut metadata, family);
+    if control_size > ANCILLARY_STACK_BUFFER_SIZE {
+        return Err(McrxError::ReceiveSocketSetupFailed(format!(
+            "ancillary buffer requirement {control_size} exceeds {ANCILLARY_STACK_BUFFER_SIZE} bytes"
+        )));
     }
+    let mut control_storage = AncillaryBuffer {
+        bytes: [std::mem::MaybeUninit::<u8>::uninit(); ANCILLARY_STACK_BUFFER_SIZE],
+    };
+    // SAFETY: the active union field is `bytes`; the union also guarantees
+    // CMSGHDR alignment for WSARecvMsg.
+    let control = unsafe { &mut control_storage.bytes[..control_size] };
+    let mut filtered = 0usize;
 
-    Ok(Some(PacketWithMetadata {
-        packet: Packet {
-            subscription_id,
-            source,
-            group,
-            dst_port: config.dst_port,
-            payload: Bytes::copy_from_slice(payload_bytes),
-        },
-        metadata,
-    }))
+    loop {
+        let mut data_buf = WSABUF {
+            len: buf.len() as u32,
+            buf: buf.as_mut_ptr().cast(),
+        };
+        let mut bytes_received = 0u32;
+
+        let (msg, addr) = match unsafe {
+            SockAddr::try_init(|addr_storage, addr_len| {
+                let mut msg = WSAMSG::default();
+                msg.name = addr_storage.cast::<SOCKADDR>();
+                msg.namelen = *addr_len as i32;
+                msg.lpBuffers = std::ptr::addr_of_mut!(data_buf);
+                msg.dwBufferCount = 1;
+
+                if !control.is_empty() {
+                    msg.Control = WSABUF {
+                        len: control.len() as u32,
+                        buf: control.as_mut_ptr().cast(),
+                    };
+                }
+
+                let result = recvmsg(
+                    raw_socket(socket.socket()),
+                    &mut msg,
+                    &mut bytes_received,
+                    std::ptr::null_mut(),
+                    None,
+                );
+
+                if result == SOCKET_ERROR {
+                    return Err(last_wsa_error());
+                }
+
+                *addr_len = msg.namelen as _;
+                Ok(msg)
+            })
+        } {
+            Ok(result) => result,
+            Err(err) if err.kind() == ErrorKind::WouldBlock => return Ok(None),
+            Err(err) => return Err(McrxError::ReceiveFailed(err)),
+        };
+
+        let source = addr.as_socket().ok_or(McrxError::NonIpSocketAddress)?;
+        let mut metadata = socket.base_metadata(config)?;
+
+        if !msg.Control.buf.is_null() && msg.Control.len != 0 {
+            apply_receive_ancillary_data(&msg, &mut metadata, family);
+        }
+
+        if !packet_matches_subscription(source, &metadata, config)? {
+            if filtered_receive_budget_exhausted(&mut filtered) {
+                return Ok(None);
+            }
+            continue;
+        }
+
+        // SAFETY: `WSARecvMsg` initialized the first `bytes_received` bytes of `buf`.
+        let payload = unsafe {
+            std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), bytes_received as usize)
+        };
+
+        return Ok(Some(PacketWithMetadata {
+            packet: Packet {
+                subscription_id,
+                source,
+                group: config.group,
+                dst_port: config.dst_port,
+                payload: Bytes::copy_from_slice(payload),
+            },
+            metadata,
+        }));
+    }
 }
 
 #[cfg(unix)]
@@ -1312,10 +1450,7 @@ fn recv_packet_with_ancillary_metadata(
     subscription_id: SubscriptionId,
     config: &SubscriptionConfig,
 ) -> Result<Option<PacketWithMetadata>, McrxError> {
-    match recv_packet_with_metadata_unix(socket, subscription_id, config) {
-        Err(McrxError::ReceiveFailed(err)) if err.kind() == ErrorKind::WouldBlock => Ok(None),
-        other => other,
-    }
+    recv_packet_with_metadata_unix(socket, subscription_id, config)
 }
 
 #[cfg(windows)]
@@ -1324,10 +1459,7 @@ fn recv_packet_with_ancillary_metadata(
     subscription_id: SubscriptionId,
     config: &SubscriptionConfig,
 ) -> Result<Option<PacketWithMetadata>, McrxError> {
-    match recv_packet_with_metadata_windows(socket, subscription_id, config) {
-        Err(McrxError::ReceiveFailed(err)) if err.kind() == ErrorKind::WouldBlock => Ok(None),
-        other => other,
-    }
+    recv_packet_with_metadata_windows(socket, subscription_id, config)
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -1336,7 +1468,10 @@ fn recv_packet_with_ancillary_metadata(
     subscription_id: SubscriptionId,
     config: &SubscriptionConfig,
 ) -> Result<Option<PacketWithMetadata>, McrxError> {
-    recv_packet_impl(socket, subscription_id, config)
+    let _ = (socket, subscription_id, config);
+    Err(McrxError::ReceiveSocketSetupFailed(
+        "destination-address metadata is unsupported on this platform".to_string(),
+    ))
 }
 
 /// Opens and binds a UDP socket for the given subscription configuration.
@@ -1417,11 +1552,7 @@ pub(crate) fn prepare_existing_socket(
         }
     }
 
-    socket
-        .set_nonblocking(true)
-        .map_err(McrxError::SocketOptionFailed)?;
-
-    let mut receive_socket = ReceiveSocket::adopt(socket);
+    let mut receive_socket = ReceiveSocket::try_adopt(socket, config)?;
     receive_socket.local_addr = Some(local_addr);
     Ok(receive_socket)
 }
@@ -1619,68 +1750,14 @@ pub(crate) fn leave_multicast_group(
     }
 }
 
-fn recv_packet_impl(
-    socket: &ReceiveSocket,
-    subscription_id: SubscriptionId,
-    config: &SubscriptionConfig,
-) -> Result<Option<PacketWithMetadata>, McrxError> {
-    let group = config.group;
-    let mut buf = [std::mem::MaybeUninit::<u8>::uninit(); 65535];
-
-    match socket.socket().recv_from(&mut buf) {
-        Ok((len, addr)) => {
-            let source = addr.as_socket().ok_or(McrxError::NonIpSocketAddress)?;
-
-            // SAFETY: `recv_from` initialized exactly the first `len` bytes of `buf`.
-            // We only create a slice over that initialized prefix, and copy it immediately.
-            let payload_bytes =
-                unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, len) };
-
-            Ok(Some(PacketWithMetadata {
-                packet: Packet {
-                    subscription_id,
-                    source,
-                    group,
-                    dst_port: config.dst_port,
-                    payload: Bytes::copy_from_slice(payload_bytes),
-                },
-                metadata: socket.base_metadata(config)?,
-            }))
-        }
-        Err(err) if err.kind() == ErrorKind::WouldBlock => Ok(None),
-        Err(err) => Err(McrxError::ReceiveFailed(err)),
-    }
-}
-
 /// Attempts to receive a packet from the given socket without blocking.
 pub(crate) fn recv_packet(
     socket: &ReceiveSocket,
     subscription_id: SubscriptionId,
     config: &SubscriptionConfig,
 ) -> Result<Option<Packet>, McrxError> {
-    let group = config.group;
-    let mut buf = [std::mem::MaybeUninit::<u8>::uninit(); 65535];
-
-    match socket.socket().recv_from(&mut buf) {
-        Ok((len, addr)) => {
-            let source = addr.as_socket().ok_or(McrxError::NonIpSocketAddress)?;
-
-            // SAFETY: `recv_from` initialized exactly the first `len` bytes of `buf`.
-            // We only create a slice over that initialized prefix, and copy it immediately.
-            let payload_bytes =
-                unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, len) };
-
-            Ok(Some(Packet {
-                subscription_id,
-                source,
-                group,
-                dst_port: config.dst_port,
-                payload: Bytes::copy_from_slice(payload_bytes),
-            }))
-        }
-        Err(err) if err.kind() == ErrorKind::WouldBlock => Ok(None),
-        Err(err) => Err(McrxError::ReceiveFailed(err)),
-    }
+    recv_packet_with_metadata(socket, subscription_id, config)
+        .map(|packet| packet.map(PacketWithMetadata::into_packet))
 }
 
 /// Attempts to receive a packet and richer receive metadata without blocking.
@@ -1689,11 +1766,8 @@ pub(crate) fn recv_packet_with_metadata(
     subscription_id: SubscriptionId,
     config: &SubscriptionConfig,
 ) -> Result<Option<PacketWithMetadata>, McrxError> {
-    if socket.uses_ancillary_metadata() {
-        return recv_packet_with_ancillary_metadata(socket, subscription_id, config);
-    }
-
-    recv_packet_impl(socket, subscription_id, config)
+    socket.ensure_ready()?;
+    recv_packet_with_ancillary_metadata(socket, subscription_id, config)
 }
 
 #[cfg(test)]
@@ -1708,6 +1782,33 @@ mod tests {
 
     fn next_test_port() -> u16 {
         NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed)
+    }
+
+    #[test]
+    fn packet_filter_enforces_destination_source_and_interface() {
+        let mut config = SubscriptionConfig::ssm(
+            Ipv4Addr::new(232, 1, 2, 3),
+            Ipv4Addr::new(192, 0, 2, 10),
+            5000,
+        );
+        config.interface_index = None;
+        let mut metadata = ReceiveMetadata::empty();
+        metadata.destination_local_ip = Some(config.group);
+
+        let expected_source = SocketAddr::new(Ipv4Addr::new(192, 0, 2, 10).into(), 1234);
+        let wrong_source = SocketAddr::new(Ipv4Addr::new(192, 0, 2, 11).into(), 1234);
+
+        assert!(packet_matches_subscription(expected_source, &metadata, &config).unwrap());
+        assert!(!packet_matches_subscription(wrong_source, &metadata, &config).unwrap());
+
+        metadata.destination_local_ip = Some(Ipv4Addr::new(232, 1, 2, 4).into());
+        assert!(!packet_matches_subscription(expected_source, &metadata, &config).unwrap());
+
+        metadata.destination_local_ip = None;
+        assert!(matches!(
+            packet_matches_subscription(expected_source, &metadata, &config),
+            Err(McrxError::ReceiveMetadataUnavailable)
+        ));
     }
 
     fn open_socket_on_available_test_port(group: Ipv4Addr) -> (SubscriptionConfig, ReceiveSocket) {

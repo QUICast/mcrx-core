@@ -295,7 +295,8 @@ impl HardwareMetricsSnapshot {
     pub fn capture_current_process() -> io::Result<Self> {
         let task_info = read_macos_task_info()?;
         let rusage = read_macos_rusage()?;
-        let open_fds = fs::read_dir("/dev/fd")?.count() as u64;
+        // Reading the descriptor directory opens one descriptor of its own.
+        let open_fds = (fs::read_dir("/dev/fd")?.count() as u64).saturating_sub(1);
 
         Ok(Self {
             cpu_user_secs_total: timeval_to_secs(rusage.ru_utime),
@@ -461,7 +462,8 @@ fn read_proc_snapshot(page_size: u64) -> io::Result<ProcSnapshot> {
         }
     }
 
-    let open_fds = fs::read_dir("/proc/self/fd")?.count() as u64;
+    // Reading the descriptor directory opens one descriptor of its own.
+    let open_fds = (fs::read_dir("/proc/self/fd")?.count() as u64).saturating_sub(1);
 
     Ok(ProcSnapshot {
         utime_ticks,

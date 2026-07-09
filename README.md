@@ -16,12 +16,14 @@ bindings for non-Rust consumers.
 - Multiple subscriptions with fair receive across them
 - Caller-provided socket support
 - Socket borrowing and extraction for event-loop integration
-- Optional pktinfo-style receive metadata
+- Pktinfo-verified destination filtering, with optional richer receive metadata
 - Optional `tokio`, `metrics`, and `raw-packets` features
 - Optional Python bindings in the sibling `mcrx-core-py` crate
 - Optional C ABI bindings in the sibling `mcrx-core-ffi` crate
 
 ## Install
+
+`mcrx-core` requires Rust 1.88 or newer.
 
 ```bash
 cargo add mcrx-core
@@ -114,7 +116,8 @@ SSM cross-platform compatibility:
 ## Notes
 
 - SSM subscriptions must use SSM group ranges: IPv4 `232.0.0.0/8` or IPv6
-  `ff3x::/32`. ASM-range groups such as `239.x.x.x` must be joined as ASM.
+  `ff3x::/32`, and those ranges require a source filter. ASM-range groups such
+  as `239.x.x.x` or `ff1x::/16` must be joined without a source.
 - macOS IPv4 SSM is wired through the IPv4-specific source-membership API. If a
   valid `232/8` SSM join still emits IGMPv2 reports on the wire, macOS may have
   stale IGMP compatibility state; see the troubleshooting note in the

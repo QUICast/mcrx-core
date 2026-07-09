@@ -331,7 +331,7 @@ mod tests {
     fn parses_scoped_ipv6_interface() {
         let args = argv(&[
             "mcrx-recv-meta",
-            "ff32::8000:1234",
+            "ff12::8000:1234",
             "5000",
             "--interface",
             "fe80::1%7",
@@ -371,7 +371,7 @@ mod tests {
         let scoped_interface = format!("fe80::1%{LOOPBACK_INTERFACE}");
         let args = argv(&[
             "mcrx-recv-meta",
-            "ff32::8000:1234",
+            "ff12::8000:1234",
             "5000",
             "--interface",
             &scoped_interface,
@@ -390,7 +390,7 @@ mod tests {
     fn parses_numeric_ipv6_interface_index() {
         let args = argv(&[
             "mcrx-recv-meta",
-            "ff3e::8000:1234",
+            "ff1e::8000:1234",
             "5000",
             "--interface",
             "9",
