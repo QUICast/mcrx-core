@@ -1033,7 +1033,12 @@ fn ancillary_buffer_size(_family: SubscriptionAddressFamily) -> usize {
     0
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, any(target_os = "linux", target_os = "android")))]
+unsafe fn control_message_contains<T>(cmsg: *const libc::cmsghdr) -> bool {
+    unsafe { (*cmsg).cmsg_len >= libc::CMSG_LEN(std::mem::size_of::<T>() as libc::c_uint) as usize }
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
 unsafe fn control_message_contains<T>(cmsg: *const libc::cmsghdr) -> bool {
     unsafe {
         (*cmsg).cmsg_len as usize

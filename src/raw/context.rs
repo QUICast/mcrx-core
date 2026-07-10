@@ -157,7 +157,9 @@ impl RawContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    #[cfg(not(target_os = "linux"))]
+    use std::net::Ipv6Addr;
+    use std::net::{IpAddr, Ipv4Addr};
 
     #[test]
     fn add_invalid_raw_subscription_is_rejected_before_socket_setup() {
