@@ -712,6 +712,7 @@ mod tests {
         };
 
         write_metrics_summary_jsonl(&later_snapshot, &later_delta, &mut writers.network).unwrap();
+        drop(writers);
 
         let contents = fs::read_to_string(&path).unwrap();
         let lines = contents
