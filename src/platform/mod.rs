@@ -31,6 +31,11 @@ use windows_sys::Win32::System::IO::OVERLAPPED;
 
 #[cfg(feature = "raw-packets")]
 mod raw;
+#[cfg(feature = "raw-shared-capture")]
+pub(crate) use raw::{
+    RawCapturedDatagram, RawSharedCaptureKey, open_shared_raw_socket, recv_shared_raw_datagram,
+    shared_raw_capture_key,
+};
 #[cfg(feature = "raw-packets")]
 pub(crate) use raw::{
     RawReceiveSocket, join_raw_multicast_group, leave_raw_multicast_group, open_raw_socket,
@@ -1064,13 +1069,41 @@ unsafe fn wsa_cmsg_nxthdr(msg: &WSAMSG, cmsg: *const CMSGHDR) -> *mut CMSGHDR {
         return wsa_cmsg_firsthdr(msg);
     }
 
-    let next = (cmsg as usize + wsa_cmsg_align(unsafe { (*cmsg).cmsg_len })) as *mut CMSGHDR;
-    let max = msg.Control.buf as usize + msg.Control.len as usize;
+    let base = msg.Control.buf as usize;
+    let Some(max) = base.checked_add(msg.Control.len as usize) else {
+        return std::ptr::null_mut();
+    };
+    let cmsg_addr = cmsg as usize;
+    let Some(current_header_end) = cmsg_addr.checked_add(std::mem::size_of::<CMSGHDR>()) else {
+        return std::ptr::null_mut();
+    };
+    if cmsg_addr < base || current_header_end > max {
+        return std::ptr::null_mut();
+    }
 
-    if next as usize + wsa_cmsg_align(std::mem::size_of::<CMSGHDR>()) > max {
+    let current_len = unsafe { (*cmsg).cmsg_len };
+    if current_len < wsa_cmsg_len(0) {
+        return std::ptr::null_mut();
+    }
+
+    let align = std::mem::align_of::<CMSGHDR>();
+    let Some(aligned_len) = current_len
+        .checked_add(align - 1)
+        .map(|length| length & !(align - 1))
+    else {
+        return std::ptr::null_mut();
+    };
+    let Some(next) = cmsg_addr.checked_add(aligned_len) else {
+        return std::ptr::null_mut();
+    };
+    let Some(next_end) = next.checked_add(wsa_cmsg_align(std::mem::size_of::<CMSGHDR>())) else {
+        return std::ptr::null_mut();
+    };
+
+    if next_end > max {
         std::ptr::null_mut()
     } else {
-        next
+        next as *mut CMSGHDR
     }
 }
 
@@ -1304,7 +1337,7 @@ fn recv_packet_with_metadata_unix(
                 }
 
                 *addr_len = msg.msg_namelen;
-                control_len = msg.msg_controllen as usize;
+                control_len = (msg.msg_controllen as usize).min(control.len());
 
                 Ok(received as usize)
             })
@@ -1409,6 +1442,7 @@ fn recv_packet_with_metadata_windows(
                 }
 
                 *addr_len = msg.namelen as _;
+                msg.Control.len = msg.Control.len.min(control.len() as u32);
                 Ok(msg)
             })
         } {
@@ -1782,6 +1816,17 @@ mod tests {
     use crate::test_support::sample_ssm_config_v6;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use std::sync::atomic::{AtomicU16, Ordering};
+
+    #[cfg(windows)]
+    #[test]
+    fn malformed_windows_control_message_stops_iteration() {
+        let mut header = unsafe { std::mem::zeroed::<CMSGHDR>() };
+        let mut msg = WSAMSG::default();
+        msg.Control.buf = std::ptr::addr_of_mut!(header).cast();
+        msg.Control.len = std::mem::size_of::<CMSGHDR>() as u32;
+
+        assert!(unsafe { wsa_cmsg_nxthdr(&msg, std::ptr::addr_of!(header)) }.is_null());
+    }
 
     static NEXT_TEST_PORT: AtomicU16 = AtomicU16::new(55100);
 

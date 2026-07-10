@@ -166,6 +166,8 @@ continue receiving after handoff.
 - Tokio: enable `tokio` and use `TokioSubscription`; see [Demo Binaries](demo.md).
 - Metrics: enable `metrics`; see [Metrics](metrics.md).
 - Raw IP datagrams: enable `raw-packets`; see [Raw Packet Receive](raw-packets.md).
+- Many Linux raw memberships: enable `raw-shared-capture` and use
+  `SharedRawContext`; see [Raw Packet Receive](raw-packets.md#shared-raw-capture-linux).
 - Python bindings: see [Python Bindings](python.md).
 
 ## Leaving, Removing, and Taking Ownership

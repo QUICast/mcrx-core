@@ -58,6 +58,11 @@ With the optional `raw-packets` feature enabled, the crate exposes a parallel
 raw receive path for complete multicast IP datagrams. See
 [Raw Packet Receive](raw-packets.md).
 
+With `raw-shared-capture`, Linux also exposes `SharedRawContext`. It owns one
+raw capture socket per resolved family/interface tuple and a separate indexed
+logical-membership layer, so capture polling scales with sockets rather than
+raw subscriptions.
+
 ## Data Flow
 
 ```mermaid

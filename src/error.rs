@@ -44,7 +44,10 @@ pub enum McrxError {
     #[error("MCRX: interface index is only supported for IPv6 subscriptions")]
     InterfaceIndexRequiresIpv6,
 
-    /// A subscription with the same configuration already exists.
+    /// A normal UDP or per-subscription raw context already contains this config.
+    ///
+    /// The opt-in shared raw context deliberately permits duplicate logical
+    /// configs and therefore does not return this variant for duplicates.
     #[error("MCRX: subscription already exists")]
     DuplicateSubscription,
 
@@ -83,6 +86,16 @@ pub enum McrxError {
     /// Raw multicast receive is not supported on this platform in this build.
     #[error("MCRX: raw multicast receive is not supported on this platform: {0}")]
     RawPacketReceiveUnsupported(String),
+
+    /// The configured shared raw capture limits are invalid.
+    #[cfg(feature = "raw-shared-capture")]
+    #[error("MCRX: shared raw capture limits must be greater than zero")]
+    InvalidSharedRawCaptureLimits,
+
+    /// The shared raw capture context reached its logical membership limit.
+    #[cfg(feature = "raw-shared-capture")]
+    #[error("MCRX: shared raw capture subscription limit of {limit} reached")]
+    SharedRawCaptureSubscriptionLimitExceeded { limit: usize },
 
     /// Legacy placeholder retained for source compatibility.
     ///

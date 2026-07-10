@@ -17,7 +17,7 @@ bindings for non-Rust consumers.
 - Caller-provided socket support
 - Socket borrowing and extraction for event-loop integration
 - Pktinfo-verified destination filtering, with optional richer receive metadata
-- Optional `tokio`, `metrics`, and `raw-packets` features
+- Optional `tokio`, `metrics`, `raw-packets`, and Linux shared raw capture
 - Optional Python bindings in the sibling `mcrx-core-py` crate
 - Optional C ABI bindings in the sibling `mcrx-core-ffi` crate
 
@@ -35,6 +35,7 @@ Optional feature examples:
 cargo add mcrx-core --features tokio
 cargo add mcrx-core --features metrics
 cargo add mcrx-core --features raw-packets
+cargo add mcrx-core --features raw-shared-capture
 ```
 
 ## Quick Start
@@ -60,6 +61,8 @@ if let Some(packet) = ctx.try_recv_any()? {
 - `tokio`: async receive wrapper for extracted subscriptions.
 - `metrics`: snapshots, deltas, samplers, and JSONL helpers.
 - `raw-packets`: complete multicast IP datagram receive for AMT-style use cases.
+- `raw-shared-capture`: Linux-only shared raw capture for many logical raw
+  memberships on one interface; implies `raw-packets`.
 - `mcrx-core-py`: sibling workspace crate with Python and asyncio bindings.
 - `mcrx-core-ffi`: sibling workspace crate with a small C ABI for Swift/C/C++.
 
@@ -90,6 +93,12 @@ Raw multicast IP datagram receive is available behind the `raw-packets`
 feature. Linux uses packet sockets, macOS uses BPF, and Windows currently
 supports IPv4 raw receive. Unsupported raw modes return a clear error instead
 of falling back to UDP payload receive.
+
+For large raw membership sets on Linux, the opt-in `raw-shared-capture` feature
+adds `SharedRawContext`. It shares one packet socket per resolved
+family/interface and demultiplexes full IP datagrams in userspace. See
+[Raw Packet Receive](docs/raw-packets.md#shared-raw-capture-linux) for its
+different platform and kernel-membership limits.
 
 ## Compatibility
 

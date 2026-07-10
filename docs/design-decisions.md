@@ -91,6 +91,13 @@ of overloading the existing UDP types with optional raw behavior.
 That separation keeps the default API stable and avoids changing semantics for
 existing users. Platform details live in [Raw Packet Receive](raw-packets.md).
 
+For high-cardinality Linux raw receive, `raw-shared-capture` adds a parallel
+`SharedRawContext` rather than changing `RawContext`. This keeps the original
+one-socket-per-subscription API predictable while making the explicit opt-in
+path share capture sockets by resolved family and interface. It demultiplexes
+each captured IP datagram through group and source indexes, avoiding a linear
+subscription scan.
+
 ## Explicit IPv6 Source and Interface Selection
 
 IPv6 multicast behavior is strongly shaped by scope and interface selection, so

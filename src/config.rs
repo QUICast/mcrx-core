@@ -2,7 +2,7 @@ use crate::error::McrxError;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// Identifies the IP address family used by a subscription configuration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SubscriptionAddressFamily {
     /// IPv4 multicast traffic.
     Ipv4,

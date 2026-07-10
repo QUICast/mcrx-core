@@ -3,11 +3,21 @@ use crate::raw::{RawPacket, RawSubscriptionConfig};
 use crate::subscription::SubscriptionId;
 use socket2::Socket;
 
-#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "macos",
+    windows,
+    feature = "raw-shared-capture"
+))]
 use crate::config::SubscriptionAddressFamily;
-#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
 use crate::packet::ReceiveMetadata;
-#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "macos",
+    windows,
+    feature = "raw-shared-capture"
+))]
 use bytes::Bytes;
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 use socket2::{Domain, Protocol, SockAddr, Type};
@@ -15,8 +25,16 @@ use socket2::{Domain, Protocol, SockAddr, Type};
 use std::ffi::{CStr, CString};
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 use std::io::ErrorKind;
+#[cfg(any(
+    target_os = "linux",
+    target_os = "macos",
+    windows,
+    test,
+    feature = "raw-shared-capture"
+))]
+use std::net::IpAddr;
 #[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{Ipv4Addr, Ipv6Addr};
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 use std::net::{SocketAddrV4, SocketAddrV6};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -101,6 +119,29 @@ impl RawReceiveSocket {
     pub(crate) fn socket(&self) -> &Socket {
         &self.receive_socket
     }
+}
+
+/// Normalized capture-socket identity for shared raw receive.
+///
+/// Linux packet sockets are shared only when both the IP family and selected
+/// interface index match. Index zero uses a wildcard packet-socket bind while
+/// the companion membership socket uses the platform-selected default.
+#[cfg(feature = "raw-shared-capture")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct RawSharedCaptureKey {
+    pub(crate) family: SubscriptionAddressFamily,
+    pub(crate) interface_index: u32,
+}
+
+/// A parsed IP datagram read once from a shared capture socket.
+#[cfg(feature = "raw-shared-capture")]
+#[derive(Debug, Clone)]
+pub(crate) struct RawCapturedDatagram {
+    pub(crate) datagram: Bytes,
+    pub(crate) source_ip: IpAddr,
+    pub(crate) group: IpAddr,
+    pub(crate) ip_protocol: u8,
+    pub(crate) ingress_interface_index: Option<u32>,
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
@@ -204,6 +245,39 @@ fn bpf_ip_filter(config: &RawSubscriptionConfig, ip_offset: u32) -> Vec<ClassicB
 }
 
 #[cfg(target_os = "linux")]
+fn bpf_ip_multicast_family_filter(
+    family: SubscriptionAddressFamily,
+    ip_offset: u32,
+) -> Vec<ClassicBpfInstruction> {
+    let (version, destination_offset, destination_mask, destination_value) = match family {
+        SubscriptionAddressFamily::Ipv4 => (0x40, ip_offset + 16, Some(0xf0), 0xe0),
+        SubscriptionAddressFamily::Ipv6 => (0x60, ip_offset + 24, None, 0xff),
+    };
+
+    let mut instructions = vec![
+        bpf_statement(BPF_LD | BPF_B | BPF_ABS, ip_offset),
+        bpf_statement(BPF_ALU | BPF_AND | BPF_K, 0xf0),
+    ];
+    let mut rejects = vec![instructions.len()];
+    instructions.push(bpf_statement(BPF_JMP | BPF_JEQ | BPF_K, version));
+    instructions.push(bpf_statement(BPF_LD | BPF_B | BPF_ABS, destination_offset));
+    if let Some(mask) = destination_mask {
+        instructions.push(bpf_statement(BPF_ALU | BPF_AND | BPF_K, mask));
+    }
+    rejects.push(instructions.len());
+    instructions.push(bpf_statement(BPF_JMP | BPF_JEQ | BPF_K, destination_value));
+    instructions.push(bpf_statement(BPF_RET | BPF_K, u32::MAX));
+    let reject_index = instructions.len();
+    instructions.push(bpf_statement(BPF_RET | BPF_K, 0));
+
+    for comparison_index in rejects {
+        instructions[comparison_index].jf = (reject_index - comparison_index - 1) as u8;
+    }
+
+    instructions
+}
+
+#[cfg(target_os = "linux")]
 pub(crate) fn open_raw_socket(
     config: &RawSubscriptionConfig,
 ) -> Result<RawReceiveSocket, McrxError> {
@@ -216,6 +290,96 @@ pub(crate) fn open_raw_socket(
         receive_socket: packet_socket,
         membership_socket: Some(membership_socket),
     })
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn shared_raw_capture_key(
+    config: &RawSubscriptionConfig,
+) -> Result<RawSharedCaptureKey, McrxError> {
+    config.validate()?;
+
+    Ok(RawSharedCaptureKey {
+        family: config.family(),
+        interface_index: resolve_linux_packet_interface_index(config)?,
+    })
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn open_shared_raw_socket(
+    key: RawSharedCaptureKey,
+) -> Result<RawReceiveSocket, McrxError> {
+    let packet_socket = open_linux_packet_socket_with_filter(
+        key.interface_index,
+        bpf_ip_multicast_family_filter(key.family, 0),
+    )?;
+    let membership_socket = open_membership_socket(key.family)?;
+
+    Ok(RawReceiveSocket {
+        receive_socket: packet_socket,
+        membership_socket: Some(membership_socket),
+    })
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn recv_shared_raw_datagram(
+    socket: &RawReceiveSocket,
+    key: RawSharedCaptureKey,
+) -> Result<Option<RawCapturedDatagram>, McrxError> {
+    let mut buf = [std::mem::MaybeUninit::<u8>::uninit(); MAX_IP_DATAGRAM_SIZE];
+    let mut filtered_reads = 0usize;
+
+    loop {
+        let mut addr: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
+        let mut addr_len = std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t;
+
+        let len = unsafe {
+            libc::recvfrom(
+                socket.socket().as_raw_fd(),
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+                0,
+                (&mut addr as *mut libc::sockaddr_ll).cast(),
+                &mut addr_len,
+            )
+        };
+
+        if len == -1 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == ErrorKind::WouldBlock {
+                return Ok(None);
+            }
+            return Err(McrxError::ReceiveFailed(err));
+        }
+
+        let len = len as usize;
+        // SAFETY: recvfrom initialized exactly the returned prefix of buf.
+        let datagram = unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), len) };
+        let Some(parsed) = parse_ip_datagram(datagram) else {
+            if raw_filter_budget_exhausted(&mut filtered_reads) {
+                return Ok(None);
+            }
+            continue;
+        };
+
+        if !matches!(
+            (key.family, parsed.destination_ip),
+            (SubscriptionAddressFamily::Ipv4, IpAddr::V4(_))
+                | (SubscriptionAddressFamily::Ipv6, IpAddr::V6(_))
+        ) {
+            if raw_filter_budget_exhausted(&mut filtered_reads) {
+                return Ok(None);
+            }
+            continue;
+        }
+
+        return Ok(Some(RawCapturedDatagram {
+            datagram: Bytes::copy_from_slice(&datagram[..parsed.datagram_len]),
+            source_ip: parsed.source_ip,
+            group: parsed.destination_ip,
+            ip_protocol: parsed.protocol,
+            ingress_interface_index: (addr.sll_ifindex > 0).then_some(addr.sll_ifindex as u32),
+        }));
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -286,6 +450,34 @@ pub(crate) fn open_raw_socket(
 ) -> Result<RawReceiveSocket, McrxError> {
     Err(McrxError::RawPacketReceiveUnsupported(
         "raw multicast receive is currently implemented on Linux, macOS, and Windows".to_string(),
+    ))
+}
+
+#[cfg(all(feature = "raw-shared-capture", not(target_os = "linux")))]
+pub(crate) fn shared_raw_capture_key(
+    _config: &RawSubscriptionConfig,
+) -> Result<RawSharedCaptureKey, McrxError> {
+    Err(McrxError::RawPacketReceiveUnsupported(
+        "shared raw capture is currently implemented on Linux only".to_string(),
+    ))
+}
+
+#[cfg(all(feature = "raw-shared-capture", not(target_os = "linux")))]
+pub(crate) fn open_shared_raw_socket(
+    _key: RawSharedCaptureKey,
+) -> Result<RawReceiveSocket, McrxError> {
+    Err(McrxError::RawPacketReceiveUnsupported(
+        "shared raw capture is currently implemented on Linux only".to_string(),
+    ))
+}
+
+#[cfg(all(feature = "raw-shared-capture", not(target_os = "linux")))]
+pub(crate) fn recv_shared_raw_datagram(
+    _socket: &RawReceiveSocket,
+    _key: RawSharedCaptureKey,
+) -> Result<Option<RawCapturedDatagram>, McrxError> {
+    Err(McrxError::RawPacketReceiveUnsupported(
+        "shared raw capture is currently implemented on Linux only".to_string(),
     ))
 }
 
@@ -560,6 +752,17 @@ pub(crate) fn recv_raw_packet(
 
 #[cfg(target_os = "linux")]
 fn open_linux_packet_socket(config: &RawSubscriptionConfig) -> Result<Socket, McrxError> {
+    open_linux_packet_socket_with_filter(
+        resolve_linux_packet_interface_index(config)?,
+        bpf_ip_filter(config, 0),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn open_linux_packet_socket_with_filter(
+    interface_index: u32,
+    instructions: Vec<ClassicBpfInstruction>,
+) -> Result<Socket, McrxError> {
     let protocol = linux_packet_socket_protocol();
     let raw_fd = unsafe {
         libc::socket(
@@ -576,8 +779,7 @@ fn open_linux_packet_socket(config: &RawSubscriptionConfig) -> Result<Socket, Mc
     }
 
     let socket = unsafe { Socket::from_raw_fd(raw_fd) };
-    attach_linux_subscription_filter(&socket, config)?;
-    let interface_index = resolve_linux_packet_interface_index(config)?;
+    attach_linux_filter(&socket, instructions)?;
 
     let bind_addr = libc::sockaddr_ll {
         sll_family: libc::AF_PACKET as u16,
@@ -612,9 +814,9 @@ fn linux_packet_socket_protocol() -> u16 {
 }
 
 #[cfg(target_os = "linux")]
-fn attach_linux_subscription_filter(
+fn attach_linux_filter(
     socket: &Socket,
-    config: &RawSubscriptionConfig,
+    mut instructions: Vec<ClassicBpfInstruction>,
 ) -> Result<(), McrxError> {
     const _: () = assert!(
         std::mem::size_of::<ClassicBpfInstruction>() == std::mem::size_of::<libc::sock_filter>()
@@ -623,7 +825,6 @@ fn attach_linux_subscription_filter(
         std::mem::align_of::<ClassicBpfInstruction>() == std::mem::align_of::<libc::sock_filter>()
     );
 
-    let mut instructions = bpf_ip_filter(config, 0);
     let program = libc::sock_fprog {
         len: instructions.len() as u16,
         filter: instructions.as_mut_ptr().cast::<libc::sock_filter>(),
@@ -1103,7 +1304,7 @@ fn resolve_ipv4_interface_index(interface: Ipv4Addr) -> Result<u32, McrxError> {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
 fn packet_matches_config(parsed: ParsedIpDatagram, config: &RawSubscriptionConfig) -> bool {
     if !matches!(
         (config.family(), parsed.destination_ip),
@@ -1123,7 +1324,7 @@ fn packet_matches_config(parsed: ParsedIpDatagram, config: &RawSubscriptionConfi
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
 fn raw_packet_from_parts(
     subscription_id: SubscriptionId,
     datagram: &[u8],
@@ -1391,6 +1592,34 @@ mod tests {
         datagram[15] = 3;
         datagram[19] = 4;
         assert_eq!(run_bpf_filter(&filter, &datagram), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn shared_capture_filter_rejects_other_ip_families_and_unicast() {
+        let mut ipv4 = [0u8; 20];
+        ipv4[0] = 0x45;
+        ipv4[16..20].copy_from_slice(&[239, 1, 2, 3]);
+        let ipv4_filter = bpf_ip_multicast_family_filter(SubscriptionAddressFamily::Ipv4, 0);
+
+        assert_ne!(run_bpf_filter(&ipv4_filter, &ipv4), 0);
+        ipv4[0] = 0x60;
+        assert_eq!(run_bpf_filter(&ipv4_filter, &ipv4), 0);
+        ipv4[0] = 0x45;
+        ipv4[16] = 192;
+        assert_eq!(run_bpf_filter(&ipv4_filter, &ipv4), 0);
+
+        let mut ipv6 = [0u8; 40];
+        ipv6[0] = 0x60;
+        ipv6[24] = 0xff;
+        let ipv6_filter = bpf_ip_multicast_family_filter(SubscriptionAddressFamily::Ipv6, 0);
+
+        assert_ne!(run_bpf_filter(&ipv6_filter, &ipv6), 0);
+        ipv6[0] = 0x45;
+        assert_eq!(run_bpf_filter(&ipv6_filter, &ipv6), 0);
+        ipv6[0] = 0x60;
+        ipv6[24] = 0x20;
+        assert_eq!(run_bpf_filter(&ipv6_filter, &ipv6), 0);
     }
 
     #[cfg(target_os = "macos")]

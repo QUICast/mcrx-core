@@ -7,6 +7,10 @@ This support is gated behind the `raw-packets` Cargo feature so normal UDP
 users do not pay for extra API surface, platform checks, or privileged socket
 requirements.
 
+For Linux applications with many raw memberships, the additive
+`raw-shared-capture` feature provides a separate shared-socket API. It implies
+`raw-packets`; neither feature changes the default UDP API.
+
 ## Status
 
 Current first-pass support:
@@ -15,6 +19,8 @@ Current first-pass support:
 - macOS: implemented through BPF, with explicit interface selection required
 - Windows: implemented for IPv4 raw receive, with explicit IPv4 interface
   selection required
+- Shared raw capture: implemented on Linux only; macOS and Windows return a
+  typed unsupported error rather than falling back to per-subscription capture
 
 The raw API is intentionally separate from the UDP API. Enabling
 `raw-packets` does not change the behavior of `Context`, `Subscription`,
@@ -37,6 +43,7 @@ IP datagram so it can be wrapped or forwarded intact.
 
 ```bash
 cargo add mcrx-core --features raw-packets
+cargo add mcrx-core --features raw-shared-capture
 ```
 
 ## Raw API Types
@@ -82,6 +89,99 @@ The feature also includes a small receiver binary for platform testing:
 cargo run --features raw-packets --bin mcrx_raw_recv -- 239.1.2.3 --interface 192.168.1.20
 cargo run --features raw-packets --bin mcrx_raw_recv -- ff1e::8000:1234 --interface 7
 ```
+
+## Shared Raw Capture (Linux)
+
+`RawContext` deliberately keeps its original one-capture-socket-per-logical-
+subscription behavior. Applications that need to join hundreds or thousands of
+raw memberships can instead opt into `raw-shared-capture` and use
+`SharedRawContext`.
+
+The shared backend opens approximately one Linux packet socket per resolved IP
+family/interface tuple, installs ASM or SSM memberships on a normal membership
+socket for that tuple, and indexes packets by multicast group then source
+address. A complete kernel IP datagram is read once. Its `SharedRawPacket`
+identifies every matching logical subscription, so duplicate logical
+memberships do not cause duplicate capture reads.
+
+```rust
+use mcrx_core::{RawSubscriptionConfig, SharedRawContext};
+use std::net::Ipv4Addr;
+
+let mut ctx = SharedRawContext::new();
+let mut config = RawSubscriptionConfig::asm(Ipv4Addr::new(239, 1, 2, 3));
+config.interface = Some(Ipv4Addr::new(192, 168, 1, 20).into());
+
+let id = ctx.add_subscription(config)?;
+ctx.join_subscription(id)?;
+
+if let Some(packet) = ctx.try_recv_any()? {
+    assert_eq!(packet.packet.subscription_id, id);
+    assert_eq!(packet.matching_subscription_ids(), &[id]);
+    println!("received {} raw bytes", packet.packet.datagram_len());
+}
+
+assert_eq!(ctx.capture_socket_count(), 1);
+```
+
+The repository also includes a Linux-oriented runnable example:
+
+```bash
+cargo run --example shared_raw_capture --features raw-shared-capture -- \
+  239.1.2.3 192.168.1.20
+```
+
+`SharedRawContext` provides independent `add_subscription`, `join_subscription`,
+`leave_subscription`, and `remove_subscription` operations. Unlike `RawContext`,
+it intentionally permits duplicate configs: duplicate handles share a
+reference-counted kernel membership, and leaving one handle does not affect the
+others. Leaving the final logical membership for a family/interface tuple closes
+that capture socket. Its default bounds are 4,096 logical subscriptions and
+1,024 queued demultiplexed packets. Use
+`SharedRawContext::with_limits(SharedRawContextLimits { .. })` to set explicit
+bounds.
+
+With both `raw-shared-capture` and `metrics` enabled,
+`SharedRawContext::metrics_snapshot()` reports the current capture-socket and
+active-membership counts plus process-lifetime received, unmatched, and
+demultiplex-match totals. It also reports the current bounded pending-packet
+count.
+
+Receive work is proportional to the number of capture sockets polled plus the
+matched subscription IDs, never a scan of every logical subscription. Shared
+capture remains nonblocking and does not expose a per-logical-subscription
+socket because that socket is intentionally shared.
+
+Resolved interface keys are cached per context and reference-counted by stored
+subscriptions, so adding many groups on one explicit interface performs the
+platform interface lookup once. Removing the final subscription for a selector
+also removes the cache entry.
+
+The common case of one matching logical membership is stored inline without a
+separate match-list allocation. Batch receive drains multiple datagrams from a
+ready capture before moving on, while preserving round-robin capture fairness
+between calls.
+
+### Shared Capture Limits and Tests
+
+Shared capture needs Linux raw-socket permission (`CAP_NET_RAW` or root). It
+also does not bypass Linux multicast membership limits: a test with 1,000
+logical joins normally needs the namespace-local
+`net.ipv4.igmp_max_memberships` sysctl raised first.
+
+The privileged integration test does that in an isolated network namespace. It
+also verifies duplicate-membership demultiplexing, leave isolation, batched
+receive, and final capture-socket cleanup:
+
+```bash
+sudo unshare --user --map-root-user --net \
+  cargo test -p mcrx-core --features raw-shared-capture \
+  --test shared_raw_capture_linux -- --ignored
+```
+
+The test requires a host that permits unprivileged user namespaces and has the
+`ip` and `sysctl` utilities. It is ignored by default and is not required for
+ordinary CI.
 
 ## Raw Packet Shape
 
@@ -129,6 +229,9 @@ Practical notes:
   group, and optional source in the kernel; parsing verifies them again
 - multicast join and leave still reuse the normal multicast membership logic
 - interface selection matters, especially for IPv6 and link-local groups
+- with no explicit interface, Linux binds the packet socket to all interfaces
+  while the membership socket uses the kernel-selected default; use an explicit
+  selector when capture must be restricted to one interface
 
 Manual same-host check:
 
@@ -139,6 +242,11 @@ tcpdump -Q out -ni <iface> 'dst host 239.1.2.3'
 
 When a local sender emits to `239.1.2.3`, both tcpdump and `mcrx_raw_recv`
 should see the packet even if `tcpdump -Q in` stays quiet.
+
+For `raw-shared-capture`, the packet socket remains `ETH_P_ALL` and uses a
+family-and-multicast-destination BPF filter. Exact group and source filtering
+happen in the shared userspace index after the packet is parsed. This preserves
+locally emitted multicast packets that Linux exposes only as `PACKET_OUTGOING`.
 
 ### macOS
 
