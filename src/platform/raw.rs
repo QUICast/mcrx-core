@@ -891,12 +891,8 @@ fn interface_name_from_index(interface_index: u32) -> Result<CString, McrxError>
 
 #[cfg(windows)]
 fn open_windows_raw_socket(interface: Ipv4Addr) -> Result<Socket, McrxError> {
-    let socket = Socket::new(
-        Domain::IPV4,
-        Type::RAW,
-        Some(Protocol::from(IPPROTO_IP as i32)),
-    )
-    .map_err(McrxError::RawSocketCreateFailed)?;
+    let socket = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::from(IPPROTO_IP)))
+        .map_err(McrxError::RawSocketCreateFailed)?;
 
     socket
         .bind(&SockAddr::from(SocketAddrV4::new(interface, 0)))
@@ -912,12 +908,8 @@ fn open_windows_raw_socket(interface: Ipv4Addr) -> Result<Socket, McrxError> {
 
 #[cfg(windows)]
 fn open_windows_udp_raw_socket(interface: Ipv4Addr) -> Result<Socket, McrxError> {
-    let socket = Socket::new(
-        Domain::IPV4,
-        Type::RAW,
-        Some(Protocol::from(IPPROTO_UDP as i32)),
-    )
-    .map_err(McrxError::RawSocketCreateFailed)?;
+    let socket = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::from(IPPROTO_UDP)))
+        .map_err(McrxError::RawSocketCreateFailed)?;
 
     socket
         .bind(&SockAddr::from(SocketAddrV4::new(interface, 0)))

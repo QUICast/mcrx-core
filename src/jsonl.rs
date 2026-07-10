@@ -90,13 +90,28 @@ fn open_locked_jsonl_file(path: &Path) -> Result<File, std::io::Error> {
         .read(true)
         .append(true)
         .open(path)?;
-    file.try_lock_exclusive().map_err(|err| {
-        std::io::Error::new(
-            err.kind(),
-            format!("JSONL output is already locked by another writer: {err}"),
-        )
-    })?;
+    file.try_lock_exclusive().map_err(jsonl_lock_error)?;
     Ok(file)
+}
+
+#[cfg(feature = "metrics")]
+fn jsonl_lock_error(err: std::io::Error) -> std::io::Error {
+    #[cfg(windows)]
+    {
+        // Windows reports LockFileEx conflicts as raw errors 32 or 33 instead
+        // of mapping them to ErrorKind::WouldBlock like Unix does.
+        if matches!(err.raw_os_error(), Some(32 | 33)) {
+            return std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                format!("JSONL output is already locked by another writer: {err}"),
+            );
+        }
+    }
+
+    std::io::Error::new(
+        err.kind(),
+        format!("JSONL output is already locked by another writer: {err}"),
+    )
 }
 
 #[cfg(feature = "metrics")]

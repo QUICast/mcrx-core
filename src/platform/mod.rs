@@ -726,7 +726,7 @@ fn set_ipv6_source_membership_option(
     let result = unsafe {
         setsockopt(
             raw_socket(socket),
-            IPPROTO_IPV6 as i32,
+            IPPROTO_IPV6,
             option_name,
             (&request as *const GROUP_SOURCE_REQ).cast(),
             std::mem::size_of_val(&request) as i32,
@@ -870,11 +870,9 @@ fn enable_receive_metadata(
     family: SubscriptionAddressFamily,
 ) -> Result<(), McrxError> {
     match family {
-        SubscriptionAddressFamily::Ipv4 => {
-            set_socket_option_flag(socket, IPPROTO_IP as i32, IP_PKTINFO)
-        }
+        SubscriptionAddressFamily::Ipv4 => set_socket_option_flag(socket, IPPROTO_IP, IP_PKTINFO),
         SubscriptionAddressFamily::Ipv6 => {
-            set_socket_option_flag(socket, IPPROTO_IPV6 as i32, IPV6_PKTINFO)
+            set_socket_option_flag(socket, IPPROTO_IPV6, IPV6_PKTINFO)
         }
     }
 }
@@ -1383,11 +1381,13 @@ fn recv_packet_with_metadata_windows(
 
         let (msg, addr) = match unsafe {
             SockAddr::try_init(|addr_storage, addr_len| {
-                let mut msg = WSAMSG::default();
-                msg.name = addr_storage.cast::<SOCKADDR>();
-                msg.namelen = *addr_len as i32;
-                msg.lpBuffers = std::ptr::addr_of_mut!(data_buf);
-                msg.dwBufferCount = 1;
+                let mut msg = WSAMSG {
+                    name: addr_storage.cast::<SOCKADDR>(),
+                    namelen: *addr_len,
+                    lpBuffers: std::ptr::addr_of_mut!(data_buf),
+                    dwBufferCount: 1,
+                    ..WSAMSG::default()
+                };
 
                 if !control.is_empty() {
                     msg.Control = WSABUF {
@@ -1816,6 +1816,15 @@ mod tests {
         ));
     }
 
+    #[cfg(all(
+        unix,
+        not(any(
+            target_os = "solaris",
+            target_os = "illumos",
+            target_os = "cygwin",
+            target_os = "wasi"
+        ))
+    ))]
     fn open_socket_on_available_test_port(group: Ipv4Addr) -> (SubscriptionConfig, ReceiveSocket) {
         for _ in 0..128 {
             let config = SubscriptionConfig::asm(group, next_test_port());
