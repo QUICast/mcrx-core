@@ -870,6 +870,7 @@ pub unsafe extern "C" fn mcrx_context_stop(context: *mut McrxContext) -> c_int {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use socket2::SockRef;
     use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
     use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
     use std::time::Instant;
@@ -884,6 +885,16 @@ mod tests {
             .local_addr()
             .unwrap()
             .port()
+    }
+
+    fn make_loopback_multicast_sender() -> UdpSocket {
+        let sender = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
+        sender.set_multicast_loop_v4(true).unwrap();
+        sender.set_multicast_ttl_v4(1).unwrap();
+        SockRef::from(&sender)
+            .set_multicast_if_v4(&Ipv4Addr::LOCALHOST)
+            .unwrap();
+        sender
     }
 
     unsafe extern "C" fn count_packet(packet: *const McrxPacketView, user_data: *mut c_void) {
@@ -923,6 +934,7 @@ mod tests {
         assert!(!context.is_null());
 
         let group = cstring("239.1.2.3");
+        let interface = cstring("127.0.0.1");
         let port = unused_udp_port_v4();
         let mut subscription_id = 0u64;
         let add_status = unsafe {
@@ -931,7 +943,7 @@ mod tests {
                 group.as_ptr(),
                 port,
                 ptr::null(),
-                ptr::null(),
+                interface.as_ptr(),
                 &mut subscription_id,
             )
         };
@@ -941,7 +953,7 @@ mod tests {
         let join_status = unsafe { mcrx_context_join_subscription(context, subscription_id) };
         assert_eq!(join_status, MCRX_STATUS_OK);
 
-        let sender = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+        let sender = make_loopback_multicast_sender();
         sender
             .send_to(
                 b"ffi packet",
@@ -1056,6 +1068,7 @@ mod tests {
         assert!(!context.is_null());
         let group_addr = Ipv4Addr::new(239, 1, 2, 6);
         let group = cstring(&group_addr.to_string());
+        let interface = cstring("127.0.0.1");
         let port = unused_udp_port_v4();
         let mut subscription_id = 0u64;
         assert_eq!(
@@ -1065,7 +1078,7 @@ mod tests {
                     group.as_ptr(),
                     port,
                     ptr::null(),
-                    ptr::null(),
+                    interface.as_ptr(),
                     &mut subscription_id,
                 )
             },
@@ -1094,7 +1107,7 @@ mod tests {
             MCRX_STATUS_OK
         );
 
-        let sender = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+        let sender = make_loopback_multicast_sender();
         let destination = SocketAddrV4::new(group_addr, port);
         sender.send_to(b"restart-1", destination).unwrap();
 

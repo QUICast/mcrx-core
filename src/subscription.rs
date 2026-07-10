@@ -403,10 +403,10 @@ mod tests {
     use crate::config::{SourceFilter, SubscriptionConfig};
     use crate::platform;
     use crate::test_support::{
-        ipv6_group_socket_addr, make_multicast_sender, make_multicast_sender_v6,
-        make_multicast_sender_v6_for_source, sample_config_on_unused_port,
-        sample_config_v6_on_unused_port, sample_ssm_receive_config_v6_on_unused_port,
-        unused_udp_port_v4,
+        ipv6_group_socket_addr, ipv6_multicast_loopback_available, make_multicast_sender,
+        make_multicast_sender_v6, make_multicast_sender_v6_for_source,
+        sample_config_on_unused_port, sample_config_v6_on_unused_port,
+        sample_ssm_receive_config_v6_on_unused_port, unused_udp_port_v4,
     };
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6, UdpSocket};
     use std::time::{Duration, Instant};
@@ -591,11 +591,15 @@ mod tests {
                 config.dst_port,
             )))
         );
-        assert_eq!(packet.metadata.configured_interface, None);
+        assert_eq!(packet.metadata.configured_interface, config.interface);
     }
 
     #[test]
     fn try_recv_with_metadata_exposes_current_ipv6_socket_context() {
+        if !ipv6_multicast_loopback_available() {
+            return;
+        }
+
         let config = sample_config_v6_on_unused_port();
         let socket = platform::open_bound_socket(&config).unwrap();
         let mut subscription =

@@ -516,8 +516,9 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use crate::test_support::{
-        ipv6_group_socket_addr, make_multicast_sender, make_multicast_sender_v6, recv_next_packet,
-        sample_config_on_unused_port, sample_config_v6_on_unused_port,
+        ipv6_group_socket_addr, ipv6_multicast_loopback_available, make_multicast_sender,
+        make_multicast_sender_v6, recv_next_packet, sample_config_on_unused_port,
+        sample_config_v6_on_unused_port,
     };
 
     fn make_bound_external_socket(port: u16) -> Socket {
@@ -659,6 +660,10 @@ mod tests {
 
     #[test]
     fn try_recv_any_returns_packet_from_ready_ipv6_subscription() {
+        if !ipv6_multicast_loopback_available() {
+            return;
+        }
+
         let mut context = Context::new();
         let config = sample_config_v6_on_unused_port();
         let id = context.add_subscription(config.clone()).unwrap();
@@ -681,6 +686,10 @@ mod tests {
 
     #[test]
     fn try_recv_any_with_metadata_returns_packet_from_ready_ipv6_subscription() {
+        if !ipv6_multicast_loopback_available() {
+            return;
+        }
+
         let mut context = Context::new();
         let config = sample_config_v6_on_unused_port();
         let id = context.add_subscription(config.clone()).unwrap();

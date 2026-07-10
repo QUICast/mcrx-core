@@ -4,18 +4,23 @@ use crate::{Context, Packet, SourceFilter, SubscriptionConfig};
 use socket2::SockRef;
 use std::net::IpAddr;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6, UdpSocket};
+use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
+static IPV6_MULTICAST_LOOPBACK_AVAILABLE: OnceLock<bool> = OnceLock::new();
+
 /// Creates a standard ASM test subscription configuration on the given port.
 pub(crate) fn sample_config(port: u16) -> SubscriptionConfig {
-    SubscriptionConfig {
+    let mut config = SubscriptionConfig {
         group: IpAddr::V4(Ipv4Addr::new(239, 1, 2, 3)),
         source: SourceFilter::Any,
         dst_port: port,
         interface: None,
         interface_index: None,
-    }
+    };
+    config.interface = Some(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    config
 }
 
 /// Returns an unused IPv4 UDP port for tests that need to bind a receive socket.
@@ -87,8 +92,52 @@ pub(crate) fn sample_ssm_receive_config_v6(port: u16) -> Option<SubscriptionConf
 
     #[cfg(not(target_vendor = "apple"))]
     {
+        if !ipv6_multicast_loopback_available() {
+            return None;
+        }
         sample_ssm_config_v6(port)
     }
+}
+
+/// Returns whether this host can route an IPv6 multicast packet over loopback.
+///
+/// Some hosted macOS runners expose `::1` but omit the corresponding multicast
+/// route. Packet-delivery tests return early in that environment while socket,
+/// parser, and join tests remain covered.
+pub(crate) fn ipv6_multicast_loopback_available() -> bool {
+    *IPV6_MULTICAST_LOOPBACK_AVAILABLE.get_or_init(|| {
+        let interface = Ipv6Addr::LOCALHOST;
+        let ifindex = match crate::platform::resolve_ipv6_interface_index(interface) {
+            Ok(ifindex) => ifindex,
+            Err(_) => return false,
+        };
+        let sender = match UdpSocket::bind(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0)) {
+            Ok(sender) => sender,
+            Err(_) => return false,
+        };
+
+        if sender.set_multicast_loop_v6(true).is_err() {
+            return false;
+        }
+
+        let socket = SockRef::from(&sender);
+        if socket.set_multicast_hops_v6(1).is_err() || socket.set_multicast_if_v6(ifindex).is_err()
+        {
+            return false;
+        }
+
+        sender
+            .send_to(
+                &[],
+                SocketAddrV6::new(
+                    Ipv6Addr::from([0xff, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
+                    9,
+                    0,
+                    ifindex,
+                ),
+            )
+            .is_ok()
+    })
 }
 
 /// Creates an IPv6 SSM receive test configuration on an unused IPv6 UDP port.
@@ -111,9 +160,12 @@ pub(crate) fn recv_next_packet(context: &mut Context, deadline: Instant) -> Pack
 
 /// Creates a multicast-capable UDP sender socket for tests.
 pub(crate) fn make_multicast_sender() -> UdpSocket {
-    let sender = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    let sender = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
     sender.set_multicast_loop_v4(true).unwrap();
     sender.set_multicast_ttl_v4(1).unwrap();
+    SockRef::from(&sender)
+        .set_multicast_if_v4(&Ipv4Addr::LOCALHOST)
+        .unwrap();
     sender
 }
 

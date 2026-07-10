@@ -148,17 +148,13 @@ impl TokioSubscription {
 #[cfg(all(test, feature = "tokio"))]
 mod tests {
     use super::*;
-    use crate::test_support::sample_config_on_unused_port;
+    use crate::test_support::{make_multicast_sender, sample_config_on_unused_port};
     use crate::{Context, SubscriptionConfig};
     use std::net::{Ipv4Addr, SocketAddrV4};
     use tokio::time::{Duration, timeout};
 
     fn ipv4_group(config: &SubscriptionConfig) -> Ipv4Addr {
         config.ipv4_membership().unwrap().group
-    }
-
-    fn make_multicast_sender() -> std::net::UdpSocket {
-        std::net::UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)).unwrap()
     }
 
     #[tokio::test]
