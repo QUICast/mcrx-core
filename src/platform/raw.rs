@@ -244,7 +244,7 @@ fn bpf_ip_filter(config: &RawSubscriptionConfig, ip_offset: u32) -> Vec<ClassicB
     instructions
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "raw-shared-capture"))]
 fn bpf_ip_multicast_family_filter(
     family: SubscriptionAddressFamily,
     ip_offset: u32,
@@ -292,7 +292,7 @@ pub(crate) fn open_raw_socket(
     })
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "raw-shared-capture"))]
 pub(crate) fn shared_raw_capture_key(
     config: &RawSubscriptionConfig,
 ) -> Result<RawSharedCaptureKey, McrxError> {
@@ -304,7 +304,7 @@ pub(crate) fn shared_raw_capture_key(
     })
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "raw-shared-capture"))]
 pub(crate) fn open_shared_raw_socket(
     key: RawSharedCaptureKey,
 ) -> Result<RawReceiveSocket, McrxError> {
@@ -320,7 +320,7 @@ pub(crate) fn open_shared_raw_socket(
     })
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "raw-shared-capture"))]
 pub(crate) fn recv_shared_raw_datagram(
     socket: &RawReceiveSocket,
     key: RawSharedCaptureKey,
@@ -1594,7 +1594,7 @@ mod tests {
         assert_eq!(run_bpf_filter(&filter, &datagram), 0);
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "raw-shared-capture"))]
     #[test]
     fn shared_capture_filter_rejects_other_ip_families_and_unicast() {
         let mut ipv4 = [0u8; 20];
