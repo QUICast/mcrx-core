@@ -1342,6 +1342,31 @@ fn raw_packet_from_parts(
 }
 
 #[cfg(target_os = "macos")]
+const APPLE_BPF_HEADER_FIELDS_LEN: usize =
+    std::mem::offset_of!(libc::bpf_hdr, bh_hdrlen) + std::mem::size_of::<libc::c_ushort>();
+
+#[cfg(target_os = "macos")]
+fn read_apple_bpf_record_header(bytes: &[u8], offset: usize) -> Option<(usize, usize)> {
+    let header = bytes.get(offset..offset.checked_add(APPLE_BPF_HEADER_FIELDS_LEN)?)?;
+    let caplen_offset = std::mem::offset_of!(libc::bpf_hdr, bh_caplen);
+    let hdrlen_offset = std::mem::offset_of!(libc::bpf_hdr, bh_hdrlen);
+    let captured_len = u32::from_ne_bytes(
+        header
+            .get(caplen_offset..caplen_offset + std::mem::size_of::<u32>())?
+            .try_into()
+            .ok()?,
+    ) as usize;
+    let header_len = u16::from_ne_bytes(
+        header
+            .get(hdrlen_offset..hdrlen_offset + std::mem::size_of::<u16>())?
+            .try_into()
+            .ok()?,
+    ) as usize;
+
+    Some((header_len, captured_len))
+}
+
+#[cfg(target_os = "macos")]
 fn next_matching_apple_bpf_packet(
     packet_block: &[u8],
     start_offset: usize,
@@ -1351,13 +1376,13 @@ fn next_matching_apple_bpf_packet(
     config: &RawSubscriptionConfig,
 ) -> Result<(Option<RawPacket>, usize), McrxError> {
     let mut offset = start_offset;
-    let header_len = std::mem::size_of::<libc::bpf_hdr>();
 
-    while offset + header_len <= packet_block.len() {
-        let header = unsafe {
-            std::ptr::read_unaligned(packet_block[offset..].as_ptr().cast::<libc::bpf_hdr>())
+    while offset + APPLE_BPF_HEADER_FIELDS_LEN <= packet_block.len() {
+        let Some((header_len, captured_len)) = read_apple_bpf_record_header(packet_block, offset)
+        else {
+            return Ok((None, packet_block.len()));
         };
-        let record_len = (header.bh_hdrlen as usize).checked_add(header.bh_caplen as usize);
+        let record_len = header_len.checked_add(captured_len);
         let Some(record_len) = record_len else {
             return Ok((None, packet_block.len()));
         };
@@ -1365,14 +1390,14 @@ fn next_matching_apple_bpf_packet(
             .checked_add(bpf_word_align(record_len))
             .unwrap_or(packet_block.len());
 
-        if (header.bh_hdrlen as usize) < header_len {
+        if header_len < APPLE_BPF_HEADER_FIELDS_LEN {
             return Ok((None, packet_block.len()));
         }
 
-        let Some(data_start) = offset.checked_add(header.bh_hdrlen as usize) else {
+        let Some(data_start) = offset.checked_add(header_len) else {
             return Ok((None, packet_block.len()));
         };
-        let Some(data_end) = data_start.checked_add(header.bh_caplen as usize) else {
+        let Some(data_end) = data_start.checked_add(captured_len) else {
             return Ok((None, packet_block.len()));
         };
 
@@ -1624,26 +1649,27 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     fn append_bpf_record(block: &mut Vec<u8>, datagram: &[u8]) {
-        let mut header = unsafe { std::mem::zeroed::<libc::bpf_hdr>() };
-        header.bh_hdrlen = std::mem::size_of::<libc::bpf_hdr>() as _;
-        header.bh_caplen = datagram.len() as _;
-        header.bh_datalen = datagram.len() as _;
+        let mut header = [0u8; APPLE_BPF_HEADER_FIELDS_LEN];
+        let caplen_offset = std::mem::offset_of!(libc::bpf_hdr, bh_caplen);
+        let datalen_offset = std::mem::offset_of!(libc::bpf_hdr, bh_datalen);
+        let hdrlen_offset = std::mem::offset_of!(libc::bpf_hdr, bh_hdrlen);
+        let packet_len = u32::try_from(datagram.len()).unwrap().to_ne_bytes();
+        header[caplen_offset..caplen_offset + packet_len.len()].copy_from_slice(&packet_len);
+        header[datalen_offset..datalen_offset + packet_len.len()].copy_from_slice(&packet_len);
+        header[hdrlen_offset..hdrlen_offset + std::mem::size_of::<u16>()]
+            .copy_from_slice(&(APPLE_BPF_HEADER_FIELDS_LEN as u16).to_ne_bytes());
 
-        let header_bytes = unsafe {
-            std::slice::from_raw_parts(
-                (&header as *const libc::bpf_hdr).cast::<u8>(),
-                std::mem::size_of::<libc::bpf_hdr>(),
-            )
-        };
-        let record_len = header_bytes.len() + datagram.len();
-        block.extend_from_slice(header_bytes);
+        let record_len = header.len() + datagram.len();
+        block.extend_from_slice(&header);
         block.extend_from_slice(datagram);
         block.resize(block.len() + bpf_word_align(record_len) - record_len, 0);
     }
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn bpf_batch_preserves_every_matching_record() {
+    fn bpf_batch_accepts_compact_headers_and_preserves_every_matching_record() {
+        assert!(APPLE_BPF_HEADER_FIELDS_LEN < std::mem::size_of::<libc::bpf_hdr>());
+
         fn datagram(source_last_octet: u8) -> [u8; 20] {
             let mut datagram = [0u8; 20];
             datagram[0] = 0x45;

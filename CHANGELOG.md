@@ -22,3 +22,5 @@
 - Hardened Unix and Windows ancillary metadata parsing by clamping kernel-
   reported control lengths to the supplied buffers and rejecting malformed
   Windows control-message chains that do not advance safely.
+- Fixed macOS raw receive rejecting valid BPF records whose serialized header
+  omits the trailing padding present in the host `bpf_hdr` struct.

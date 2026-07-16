@@ -2,13 +2,14 @@
 
 use crate::{Context, Packet, SourceFilter, SubscriptionConfig};
 use socket2::SockRef;
-use std::net::IpAddr;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6, UdpSocket};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
 static IPV6_MULTICAST_LOOPBACK_AVAILABLE: OnceLock<bool> = OnceLock::new();
+static NEXT_TEST_PORT: AtomicU32 = AtomicU32::new(0);
 
 /// Creates a standard ASM test subscription configuration on the given port.
 pub(crate) fn sample_config(port: u16) -> SubscriptionConfig {
@@ -25,20 +26,38 @@ pub(crate) fn sample_config(port: u16) -> SubscriptionConfig {
 
 /// Returns an unused IPv4 UDP port for tests that need to bind a receive socket.
 pub(crate) fn unused_udp_port_v4() -> u16 {
-    UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    unused_udp_port(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0).into())
 }
 
 /// Returns an unused IPv6 UDP port for tests that need to bind a receive socket.
 pub(crate) fn unused_udp_port_v6() -> u16 {
-    UdpSocket::bind(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 0, 0, 0))
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    unused_udp_port(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 0, 0, 0).into())
+}
+
+fn unused_udp_port(bind_addr: SocketAddr) -> u16 {
+    // Stay below default dynamic ranges so parallel sender sockets cannot take
+    // a probed receive port before its test binds the real socket.
+    for _ in 0..10_000 {
+        let port = 20_000 + (NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed) % 10_000) as u16;
+        let candidate: SocketAddr = match bind_addr {
+            SocketAddr::V4(address) => SocketAddrV4::new(*address.ip(), port).into(),
+            SocketAddr::V6(address) => {
+                SocketAddrV6::new(*address.ip(), port, address.flowinfo(), address.scope_id())
+                    .into()
+            }
+        };
+
+        match UdpSocket::bind(candidate) {
+            Ok(_) => return port,
+            Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => continue,
+            Err(err) if cfg!(windows) && err.kind() == std::io::ErrorKind::PermissionDenied => {
+                continue;
+            }
+            Err(err) => panic!("failed to probe UDP test port {port}: {err}"),
+        }
+    }
+
+    panic!("failed to find an available UDP test port in 20000..30000");
 }
 
 /// Creates a standard ASM test subscription configuration on an unused IPv4

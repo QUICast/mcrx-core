@@ -872,19 +872,29 @@ mod tests {
     use super::*;
     use socket2::SockRef;
     use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
-    use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicI32, AtomicU32, AtomicUsize, Ordering};
     use std::time::Instant;
 
     fn cstring(value: &str) -> CString {
         CString::new(value).unwrap()
     }
 
+    static NEXT_TEST_PORT: AtomicU32 = AtomicU32::new(0);
+
     fn unused_udp_port_v4() -> u16 {
-        UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port()
+        for _ in 0..2_000 {
+            let port = 30_000 + (NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed) % 2_000) as u16;
+            match UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)) {
+                Ok(_) => return port,
+                Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => continue,
+                Err(err) if cfg!(windows) && err.kind() == std::io::ErrorKind::PermissionDenied => {
+                    continue;
+                }
+                Err(err) => panic!("failed to probe UDP test port {port}: {err}"),
+            }
+        }
+
+        panic!("failed to find an available UDP test port in 30000..32000");
     }
 
     fn make_loopback_multicast_sender() -> UdpSocket {
