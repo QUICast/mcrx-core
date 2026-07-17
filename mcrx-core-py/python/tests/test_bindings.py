@@ -12,6 +12,13 @@ from mcrx_core import asyncio as mcrx_asyncio
 
 def _send_ipv4_multicast(group: str, port: int, payload: bytes) -> None:
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP) as sock:
+        sock.bind(("127.0.0.1", 0))
+        sock.setsockopt(
+            socket.IPPROTO_IP,
+            socket.IP_MULTICAST_IF,
+            socket.inet_aton("127.0.0.1"),
+        )
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
         sock.sendto(payload, (group, port))
 
 def _existing_interface_name() -> str:
@@ -25,6 +32,35 @@ def _existing_interface_name() -> str:
             return name
 
     return names[0][1]
+
+
+class _PipeSubscription:
+    def __init__(self, packets: list[object] | None = None) -> None:
+        self._reader, self._writer = os.pipe()
+        self.packets = packets or []
+        self.removed = False
+
+    def fileno(self) -> int:
+        return self._reader
+
+    def state(self) -> str:
+        if self.removed:
+            raise LookupError("subscription removed")
+        return "joined"
+
+    def recv_nowait(self):
+        if self.removed:
+            raise LookupError("subscription removed")
+        if self.packets:
+            return self.packets.pop(0)
+        return None
+
+    def signal(self) -> None:
+        os.write(self._writer, b"x")
+
+    def close(self) -> None:
+        os.close(self._writer)
+        os.close(self._reader)
 
 
 class BindingsTest(unittest.TestCase):
@@ -43,6 +79,23 @@ class BindingsTest(unittest.TestCase):
                 os.fstat(reader)
         finally:
             os.close(writer)
+
+    def test_reader_handle_closes_after_event_loop_shutdown(self) -> None:
+        loop = asyncio.new_event_loop()
+        sub = _PipeSubscription()
+
+        async def setup_reader():
+            return add_reader(sub, lambda _packet: None)
+
+        try:
+            handle = loop.run_until_complete(setup_reader())
+            loop.close()
+            handle.close()
+            self.assertTrue(handle.closed)
+        finally:
+            if not loop.is_closed():
+                loop.close()
+            sub.close()
 
     def test_add_subscription_parses_numeric_ipv6_interface_index(self) -> None:
         ctx = Context()
@@ -65,7 +118,7 @@ class BindingsTest(unittest.TestCase):
 
     def test_context_subscription_receives_packet(self) -> None:
         ctx = Context()
-        sub = ctx.add_subscription("239.1.2.3", 55130)
+        sub = ctx.add_subscription("239.1.2.3", 55130, interface="127.0.0.1")
         sub.join()
 
         payload = b"python-binding-packet"
@@ -85,12 +138,15 @@ class BindingsTest(unittest.TestCase):
         self.assertEqual(packet.dst_port, 55130)
         self.assertEqual(packet.payload, payload)
         self.assertEqual(sub.join_mode, "asm")
-        self.assertTrue(sub.fileno() >= 0)
+        if hasattr(sub, "fileno"):
+            self.assertTrue(sub.fileno() >= 0)
+        else:
+            self.assertTrue(sub.socket_handle() > 0)
 
     def test_async_subscription_recv(self) -> None:
         async def run() -> None:
             ctx = Context()
-            sub = ctx.add_subscription("239.1.2.4", 55131)
+            sub = ctx.add_subscription("239.1.2.4", 55131, interface="127.0.0.1")
             sub.join()
 
             async_sub = AsyncSubscription(sub)
@@ -113,7 +169,7 @@ class BindingsTest(unittest.TestCase):
     def test_add_reader_callback(self) -> None:
         async def run() -> None:
             ctx = Context()
-            sub = ctx.add_subscription("239.1.2.5", 55132)
+            sub = ctx.add_subscription("239.1.2.5", 55132, interface="127.0.0.1")
             sub.join()
 
             received = asyncio.Event()
@@ -134,7 +190,7 @@ class BindingsTest(unittest.TestCase):
 
         asyncio.run(run())
 
-    def test_poll_reader_loop_exits_when_subscription_is_removed(self) -> None:
+    def test_polling_reader_closes_when_subscription_is_removed(self) -> None:
         class RemovedSubscription:
             def recv_nowait(self):
                 raise LookupError("subscription removed")
@@ -146,50 +202,117 @@ class BindingsTest(unittest.TestCase):
                 nonlocal callback_count
                 callback_count += 1
 
-            await asyncio.wait_for(
-                mcrx_asyncio._poll_reader_loop(  # type: ignore[attr-defined]
-                    RemovedSubscription(),
-                    on_packet,
-                    with_metadata=False,
-                    poll_interval=0.001,
-                ),
-                timeout=0.1,
+            handle = add_reader(
+                RemovedSubscription(),
+                on_packet,
+                poll_interval=0.001,
             )
+            await asyncio.sleep(0.01)
 
             self.assertEqual(callback_count, 0)
+            self.assertTrue(handle.closed)
+
+        asyncio.run(run())
+
+    def test_async_recv_exits_when_subscription_is_removed_without_readiness(self) -> None:
+        async def run() -> None:
+            sub = _PipeSubscription()
+            task = asyncio.create_task(
+                mcrx_asyncio._recv_async(  # type: ignore[attr-defined]
+                    sub,
+                    with_metadata=False,
+                    loop=None,
+                    poll_interval=0.001,
+                )
+            )
+
+            try:
+                await asyncio.sleep(0.02)
+                sub.removed = True
+                with self.assertRaises(LookupError):
+                    await asyncio.wait_for(task, timeout=0.2)
+            finally:
+                if not task.done():
+                    task.cancel()
+                sub.close()
+
+        asyncio.run(run())
+
+    def test_add_reader_closes_after_removal_without_readiness(self) -> None:
+        async def run() -> None:
+            sub = _PipeSubscription()
+            handle = add_reader(sub, lambda _packet: None, poll_interval=0.001)
+
+            try:
+                sub.removed = True
+                deadline = asyncio.get_running_loop().time() + 0.2
+                while not handle.closed and asyncio.get_running_loop().time() < deadline:
+                    await asyncio.sleep(0.001)
+                self.assertTrue(handle.closed)
+            finally:
+                handle.close()
+                sub.close()
+
+        asyncio.run(run())
+
+    def test_closing_reader_from_callback_stops_current_drain(self) -> None:
+        async def run() -> None:
+            sub = _PipeSubscription([object(), object()])
+            calls = 0
+            handle = None
+
+            def on_packet(_packet) -> None:
+                nonlocal calls
+                calls += 1
+                assert handle is not None
+                handle.close()
+
+            handle = add_reader(sub, on_packet, poll_interval=0.001)
+            try:
+                sub.signal()
+                await asyncio.sleep(0.05)
+                self.assertEqual(calls, 1)
+                self.assertTrue(handle.closed)
+            finally:
+                handle.close()
+                sub.close()
+
+        asyncio.run(run())
+
+    def test_async_subscription_rejects_invalid_poll_interval(self) -> None:
+        with self.assertRaises(ValueError):
+            AsyncSubscription(object(), poll_interval=0)  # type: ignore[arg-type]
+        with self.assertRaises(ValueError):
+            AsyncSubscription(object(), poll_interval=float("nan"))  # type: ignore[arg-type]
+
+    def test_callback_may_return_an_existing_future(self) -> None:
+        async def run() -> None:
+            loop = asyncio.get_running_loop()
+            future = loop.create_future()
+            future.set_result(None)
+            mcrx_asyncio._schedule_callback_result(  # type: ignore[attr-defined]
+                loop,
+                lambda _packet: future,
+                object(),
+            )
+            await asyncio.sleep(0)
 
         asyncio.run(run())
 
     def test_add_reader_closes_itself_when_subscription_is_removed(self) -> None:
-        class RemovedSubscription:
-            def __init__(self) -> None:
-                self._reader, self._writer = os.pipe()
-
-            def fileno(self) -> int:
-                return self._reader
-
-            def recv_nowait(self):
-                raise LookupError("subscription removed")
-
-            def close(self) -> None:
-                os.close(self._writer)
-                os.close(self._reader)
-
         async def run() -> None:
             loop = asyncio.get_running_loop()
-            if not hasattr(loop, "add_reader"):
-                self.skipTest("current asyncio loop does not support add_reader")
-
             errors: list[dict[str, object]] = []
             previous_handler = loop.get_exception_handler()
             loop.set_exception_handler(lambda _loop, context: errors.append(context))
 
-            sub = RemovedSubscription()
+            sub = _PipeSubscription()
+            sub.removed = True
             payloads: list[bytes] = []
             handle = add_reader(sub, lambda packet: payloads.append(packet.payload))
 
             try:
-                os.write(sub._writer, b"x")
+                sub.signal()
                 await asyncio.sleep(0.05)
             finally:
                 handle.close()

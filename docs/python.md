@@ -42,6 +42,10 @@ That gives Python callers the four pieces that tend to matter most:
 3. receive packets with source, group, port, and optional pktinfo-style metadata
 4. integrate those subscriptions into `asyncio`
 
+The current binding scope is the normal UDP receive API. Raw packet and shared
+raw capture contexts, metrics snapshots, and caller-provided receive sockets
+remain available through the Rust API only.
+
 ## Basic Example
 
 ```python
@@ -89,19 +93,29 @@ For callback-style use:
 from mcrx_core import add_reader
 
 handle = add_reader(sub, lambda packet: print(packet.payload))
+
+# Later, or from inside the callback:
+handle.close()
 ```
 
 ### Event Loop Behavior
 
-On selector-based loops, the helper uses `loop.add_reader()` and the
-subscription file descriptor directly.
+On selector-based loops, the helper gives `loop.add_reader()` a duplicated
+subscription file descriptor. The duplicate prevents stale descriptor reuse,
+while a lightweight lifetime check closes it when the logical subscription is
+removed even if no further readiness event arrives.
 
 On platforms or loops where `add_reader()` is not available, such as the
-default Windows asyncio loop, it falls back to a thin async polling task over
+default Windows asyncio loop, it falls back to a thin polling timer over
 the same non-blocking `recv_nowait()` methods.
 
 That keeps the Rust core runtime-agnostic while still giving Python users an
 event-loop story out of the box.
+
+The returned `ReaderHandle` owns the registration. Calling `close()` is
+idempotent, may be done inside a packet callback, and stops the current drain
+before another callback is invoked. Reader handles also close themselves when
+their subscription is removed.
 
 ## Notes
 
@@ -113,3 +127,5 @@ event-loop story out of the box.
   exposed.
 - `Subscription.fileno()` is available on Unix for applications that want to
   register their own selector or callback integrations.
+- Generated extension modules and wheels are not source artifacts. Build a
+  fresh wheel before distribution rather than relying on an ignored local file.

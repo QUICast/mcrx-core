@@ -5,7 +5,7 @@ use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::os::raw::{c_char, c_int, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -50,6 +50,7 @@ pub struct McrxPacketView {
 struct ContextState {
     context: Mutex<Context>,
     last_error: Mutex<Option<CString>>,
+    handle_alive: AtomicBool,
     active_worker_generation: AtomicU64,
     next_worker_generation: AtomicU64,
     worker: Mutex<Option<JoinHandle<()>>>,
@@ -62,12 +63,35 @@ pub struct McrxContext {
     state: Arc<ContextState>,
 }
 
+impl ContextState {
+    fn clear_error(&self) {
+        if let Ok(mut last_error) = self.last_error.lock() {
+            *last_error = None;
+        }
+    }
+
+    fn set_error(&self, message: impl Into<String>) -> c_int {
+        if let Ok(mut last_error) = self.last_error.lock() {
+            *last_error = Some(cstring_lossy(message.into()));
+        }
+        MCRX_STATUS_ERROR
+    }
+
+    fn set_invalid_argument(&self, message: impl Into<String>) -> c_int {
+        if let Ok(mut last_error) = self.last_error.lock() {
+            *last_error = Some(cstring_lossy(message.into()));
+        }
+        MCRX_STATUS_INVALID_ARGUMENT
+    }
+}
+
 impl McrxContext {
     fn new() -> Self {
         Self {
             state: Arc::new(ContextState {
                 context: Mutex::new(Context::new()),
                 last_error: Mutex::new(None),
+                handle_alive: AtomicBool::new(true),
                 active_worker_generation: AtomicU64::new(0),
                 next_worker_generation: AtomicU64::new(1),
                 worker: Mutex::new(None),
@@ -78,23 +102,15 @@ impl McrxContext {
     }
 
     fn clear_error(&self) {
-        if let Ok(mut last_error) = self.state.last_error.lock() {
-            *last_error = None;
-        }
+        self.state.clear_error();
     }
 
     fn set_error(&self, message: impl Into<String>) -> c_int {
-        if let Ok(mut last_error) = self.state.last_error.lock() {
-            *last_error = Some(cstring_lossy(message.into()));
-        }
-        MCRX_STATUS_ERROR
+        self.state.set_error(message)
     }
 
     fn set_invalid_argument(&self, message: impl Into<String>) -> c_int {
-        if let Ok(mut last_error) = self.state.last_error.lock() {
-            *last_error = Some(cstring_lossy(message.into()));
-        }
-        MCRX_STATUS_INVALID_ARGUMENT
+        self.state.set_invalid_argument(message)
     }
 
     fn stop_worker(&self) -> Result<(), String> {
@@ -503,6 +519,7 @@ pub unsafe extern "C" fn mcrx_context_free(context: *mut McrxContext) {
         }
 
         let context = unsafe { Box::from_raw(context) };
+        context.state.handle_alive.store(false, Ordering::Release);
         let _ = context.stop_worker();
     }));
 }
@@ -716,6 +733,8 @@ pub unsafe extern "C" fn mcrx_context_remove_subscription(
 /// function pointer when `max_packets` is non-zero. `received_out` must point to
 /// writable memory for one `size_t`. Packet view pointers passed to `callback`
 /// are borrowed and valid only for the duration of that callback invocation.
+/// The callback may free `context`; polling then stops after that invocation and
+/// the original context pointer must not be used again.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mcrx_context_poll(
     context: *mut McrxContext,
@@ -725,13 +744,13 @@ pub unsafe extern "C" fn mcrx_context_poll(
     received_out: *mut usize,
 ) -> c_int {
     ffi_status(|| {
-        let context = match unsafe { context_from_mut_ptr(context) } {
-            Ok(context) => context,
+        let state = match unsafe { context_from_mut_ptr(context) } {
+            Ok(context) => Arc::clone(&context.state),
             Err(status) => return status,
         };
 
         if received_out.is_null() {
-            return context.set_invalid_argument("received_out must not be null");
+            return state.set_invalid_argument("received_out must not be null");
         }
 
         unsafe {
@@ -740,31 +759,35 @@ pub unsafe extern "C" fn mcrx_context_poll(
 
         let Some(callback) = callback else {
             if max_packets == 0 {
-                context.clear_error();
+                state.clear_error();
                 return MCRX_STATUS_OK;
             }
-            return context
+            return state
                 .set_invalid_argument("callback must not be null when max_packets is non-zero");
         };
 
         let mut received = 0usize;
 
         for _ in 0..max_packets {
-            let packet = match receive_one(&context.state) {
+            let packet = match receive_one(&state) {
                 Ok(Some(packet)) => packet,
                 Ok(None) => break,
-                Err(err) => return context.set_error(err),
+                Err(err) => return state.set_error(err),
             };
 
             call_packet_callback(&packet, callback, user_data);
             received += 1;
+
+            if !state.handle_alive.load(Ordering::Acquire) {
+                break;
+            }
         }
 
         unsafe {
             *received_out = received;
         }
 
-        context.clear_error();
+        state.clear_error();
         MCRX_STATUS_OK
     })
 }
@@ -777,7 +800,8 @@ pub unsafe extern "C" fn mcrx_context_poll(
 /// function pointer. `user_data` is passed through unchanged and must remain
 /// valid for as long as the callback may use it. Packet view pointers passed to
 /// `callback` are borrowed and valid only for the duration of that callback
-/// invocation.
+/// invocation. The callback may free `context`; the worker exits after that
+/// callback returns and the original context pointer must not be used again.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mcrx_context_start(
     context: *mut McrxContext,
@@ -920,6 +944,11 @@ mod tests {
         start_status: AtomicI32,
     }
 
+    struct FreeCallbackState {
+        context: usize,
+        calls: AtomicUsize,
+    }
+
     unsafe extern "C" fn restart_from_callback(
         packet: *const McrxPacketView,
         user_data: *mut c_void,
@@ -935,6 +964,17 @@ mod tests {
                 unsafe { mcrx_context_start(context, Some(restart_from_callback), user_data, 1) },
                 Ordering::Release,
             );
+        }
+    }
+
+    unsafe extern "C" fn free_context_from_callback(
+        packet: *const McrxPacketView,
+        user_data: *mut c_void,
+    ) {
+        assert!(!packet.is_null());
+        let state = unsafe { &*(user_data.cast::<FreeCallbackState>()) };
+        if state.calls.fetch_add(1, Ordering::AcqRel) == 0 {
+            unsafe { mcrx_context_free(state.context as *mut McrxContext) };
         }
     }
 
@@ -1009,6 +1049,74 @@ mod tests {
         assert_eq!(status, MCRX_STATUS_OK);
         assert_eq!(received, 0);
         unsafe { mcrx_context_free(context) };
+    }
+
+    #[test]
+    fn poll_callback_can_free_context_safely() {
+        let context = mcrx_context_new();
+        assert!(!context.is_null());
+
+        let group_addr = Ipv4Addr::new(239, 1, 2, 7);
+        let group = cstring(&group_addr.to_string());
+        let interface = cstring("127.0.0.1");
+        let port = unused_udp_port_v4();
+        let mut subscription_id = 0u64;
+        assert_eq!(
+            unsafe {
+                mcrx_context_add_subscription(
+                    context,
+                    group.as_ptr(),
+                    port,
+                    ptr::null(),
+                    interface.as_ptr(),
+                    &mut subscription_id,
+                )
+            },
+            MCRX_STATUS_OK
+        );
+        assert_eq!(
+            unsafe { mcrx_context_join_subscription(context, subscription_id) },
+            MCRX_STATUS_OK
+        );
+
+        let sender = make_loopback_multicast_sender();
+        sender
+            .send_to(b"free-context-1", SocketAddrV4::new(group_addr, port))
+            .unwrap();
+        sender
+            .send_to(b"free-context-2", SocketAddrV4::new(group_addr, port))
+            .unwrap();
+
+        let state = FreeCallbackState {
+            context: context as usize,
+            calls: AtomicUsize::new(0),
+        };
+        let deadline = Instant::now() + Duration::from_secs(1);
+
+        while state.calls.load(Ordering::Acquire) == 0 && Instant::now() < deadline {
+            let mut received = 0usize;
+            assert_eq!(
+                unsafe {
+                    mcrx_context_poll(
+                        context,
+                        8,
+                        Some(free_context_from_callback),
+                        (&state as *const FreeCallbackState).cast_mut().cast(),
+                        &mut received,
+                    )
+                },
+                MCRX_STATUS_OK
+            );
+            if received == 0 {
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        if state.calls.load(Ordering::Acquire) == 0 {
+            unsafe { mcrx_context_free(context) };
+            panic!("timed out waiting for callback");
+        }
+        assert_eq!(state.calls.load(Ordering::Acquire), 1);
     }
 
     #[test]

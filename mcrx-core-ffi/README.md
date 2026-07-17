@@ -32,6 +32,10 @@ include/mcrx_core_ffi.h
 Pointers in `McrxPacketView` are borrowed and are valid only for the duration of
 the callback.
 
+Packet callbacks may call `mcrx_context_free()`. A synchronous poll stops after
+that callback, while a background worker exits after the callback returns. The
+freed context pointer must not be used again.
+
 ## iOS Build Sketch
 
 For iOS, consume the `staticlib` output through an XCFramework:
@@ -47,6 +51,10 @@ xcodebuild -create-xcframework \
   -library ../target/aarch64-apple-ios-sim/release/libmcrx_core_ffi.a -headers include \
   -output McrxCore.xcframework
 ```
+
+Generated libraries and XCFrameworks are intentionally ignored by Git. Rebuild
+them from the current source before distribution rather than relying on an
+artifact already present in a working tree.
 
 Physical iOS devices still need Apple local-network privacy configuration and,
 for custom multicast/broadcast use, the multicast networking entitlement.

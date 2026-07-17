@@ -59,6 +59,11 @@ int mcrx_context_join_subscription(McrxContext *context, uint64_t subscription_i
 int mcrx_context_leave_subscription(McrxContext *context, uint64_t subscription_id);
 int mcrx_context_remove_subscription(McrxContext *context, uint64_t subscription_id);
 
+/*
+ * Packet view pointers are valid only for the callback invocation. The callback
+ * may free context; polling then stops, and that context pointer must not be used
+ * again.
+ */
 int mcrx_context_poll(
     McrxContext *context,
     size_t max_packets,
@@ -67,6 +72,7 @@ int mcrx_context_poll(
     size_t *received_out
 );
 
+/* A callback may free context; the worker exits after that callback returns. */
 int mcrx_context_start(
     McrxContext *context,
     McrxPacketCallback callback,

@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Fixed Python asyncio receives and callback readers outliving removed
+  subscriptions, and made `ReaderHandle.close()` stop the current packet drain
+  immediately.
+- Made synchronous C polling safe when a packet callback frees its receiver
+  context; polling now retains shared state and stops after that callback.
+- Added packaged Python runtime tests, C/C++ header checks, and iOS simulator
+  checks to CI.
+
 ## 0.3.0 - 2026-07-10
 
 - Added the opt-in `raw-shared-capture` feature and Linux-only
